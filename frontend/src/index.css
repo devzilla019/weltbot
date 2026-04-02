@@ -1,0 +1,96 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg:      #0c0e14;
+  --surface: #13161f;
+  --sur2:    #1a1e2a;
+  --border:  rgba(255,255,255,0.07);
+  --bord2:   rgba(255,255,255,0.13);
+  --text:    #d4daf0;
+  --muted:   #5a6080;
+  --buy:     #52d68a;
+  --sell:    #f06b7a;
+  --hold:    #f0a050;
+  --info:    #60aaff;
+  --mono:    'JetBrains Mono', monospace;
+  --sans:    'DM Sans', sans-serif;
+  --radius:  10px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 4px;
+  letter-spacing: 0.06em;
+  border: 1px solid;
+}
+.tag.BUY  { background: rgba(82,214,138,0.12); color: var(--buy);  border-color: rgba(82,214,138,0.3); }
+.tag.SELL { background: rgba(240,107,122,0.12); color: var(--sell); border-color: rgba(240,107,122,0.3); }
+.tag.HOLD { background: rgba(240,160,80,0.12);  color: var(--hold); border-color: rgba(240,160,80,0.3); }
+.tag.WIN  { background: rgba(82,214,138,0.12);  color: var(--buy);  border-color: rgba(82,214,138,0.2); }
+.tag.LOSS { background: rgba(240,107,122,0.12); color: var(--sell); border-color: rgba(240,107,122,0.2); }
+.tag.OPEN { background: rgba(96,170,255,0.10);  color: var(--info); border-color: rgba(96,170,255,0.2); }
+
+button {
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 7px 16px;
+  transition: all 0.15s;
+  border: 1px solid var(--bord2);
+  background: transparent;
+  color: var(--muted);
+}
+button:hover { border-color: var(--info); color: var(--info); }
+
+button.primary {
+  background: var(--buy);
+  color: #0c0e14;
+  border-color: var(--buy);
+  font-weight: 500;
+}
+button.primary:hover { opacity: 0.85; }
+
+button.danger {
+  background: rgba(240,107,122,0.12);
+  color: var(--sell);
+  border-color: rgba(240,107,122,0.3);
+}
+
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+.label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
