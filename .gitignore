@@ -1,0 +1,26 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/modules/__pycache__/
+backend/routers/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Database — never commit this
+backend/trading.db
+*.db
+
+# Environment variables — NEVER commit these
+.env
+backend/.env
+frontend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS files
+.DS_Store
+Thumbs.db 

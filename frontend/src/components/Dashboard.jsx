@@ -1,46 +1,59 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api";
-import SignalCard  from "./SignalCard";
-import RiskPanel   from "./RiskPanel";
-import TradeLog    from "./TradeLog";
-import SummaryBar  from "./SummaryBar";
+import BotStatus from "./BotStatus";
+import SummaryBar from "./SummaryBar";
+import SignalCard from "./SignalCard";
+import RiskPanel from "./RiskPanel";
+import TradeLog from "./TradeLog";
+import PositionCard from "./PositionCard";
 
 export default function Dashboard() {
-  const [signals,    setSignals]    = useState([]);
-  const [trades,     setTrades]     = useState([]);
-  const [summary,    setSummary]    = useState(null);
-  const [selected,   setSelected]   = useState(null);
-  const [loading,    setLoading]    = useState(false);
+  const [botStatus, setBotStatus] = useState(null);
+  const [signals, setSignals] = useState([]);
+  const [trades, setTrades] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [portfolio, setPortfolio] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [actionLoad, setActionLoad] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
-  const [toast,      setToast]      = useState(null);
-  const [error,      setError]      = useState(null);
+  const [toast, setToast] = useState(null);
+  const [error, setError] = useState(null);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3500);
+  const showToast = (msg, isError = false) => {
+    setToast({ msg, isError });
+    setTimeout(() => setToast(null), 4000);
   };
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [sigs, trds, sum] = await Promise.all([
+      const [status, sigs, trds, sum, port] = await Promise.all([
+        api.getBotStatus(),
         api.getAllSignals(),
         api.getTrades(),
         api.getSummary(),
+        api.getPortfolio(),
       ]);
+      setBotStatus(status);
       const sorted = (Array.isArray(sigs) ? sigs : []).sort((a, b) => {
         const ah = a.signal_data?.signal === "HOLD" ? 1 : 0;
         const bh = b.signal_data?.signal === "HOLD" ? 1 : 0;
         if (ah !== bh) return ah - bh;
-        return (b.signal_data?.confidence ?? 0) - (a.signal_data?.confidence ?? 0);
+        return (
+          (b.signal_data?.confidence ?? 0) - (a.signal_data?.confidence ?? 0)
+        );
       });
       setSignals(sorted);
       setTrades(Array.isArray(trds) ? trds : []);
       setSummary(sum);
+      setPortfolio(port);
       setLastUpdate(new Date().toLocaleTimeString());
     } catch (e) {
-      setError("Cannot reach backend — make sure uvicorn is running on port 8000");
+      setError(
+        "Cannot reach backend — run: python -m uvicorn main:app --reload --port 8000",
+      );
     } finally {
       setLoading(false);
     }
@@ -48,118 +61,264 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
+    const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, [load]);
 
-  const handleExecute = async (symbol) => {
+  const handleStart = async () => {
+    setActionLoad(true);
     try {
-      const res = await api.executeSignal(symbol);
-      showToast(res.message || "Trade simulated");
+      const res = await api.startBot();
+      showToast(res.message || "Bot started");
+      setTimeout(load, 2000);
+    } catch {
+      showToast("Failed to start bot", true);
+    } finally {
+      setActionLoad(false);
+    }
+  };
+
+  const handleStop = async () => {
+    setActionLoad(true);
+    try {
+      const res = await api.stopBot();
+      showToast(res.message || "Bot stopped");
       load();
     } catch {
-      showToast("Execution failed");
+      showToast("Failed to stop", true);
+    } finally {
+      setActionLoad(false);
+    }
+  };
+
+  const handleScan = async () => {
+    setActionLoad(true);
+    try {
+      await api.scanNow();
+      showToast("Scanning all 50 assets now — check terminal");
+      setTimeout(load, 8000);
+    } catch {
+      showToast("Scan failed", true);
+    } finally {
+      setActionLoad(false);
     }
   };
 
   const handleEvaluate = async () => {
-    const res = await api.evaluateTrades();
-    showToast(`Closed ${res.evaluated} trades`);
-    load();
+    try {
+      const res = await api.evaluateTrades();
+      showToast(`Evaluated — closed ${res.evaluated || 0} trades`);
+      load();
+    } catch {
+      showToast("Evaluate failed", true);
+    }
   };
 
   return (
-    <div style={{ minHeight: "100vh", padding: "20px 28px 60px" }}>
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+    <div style={{ minHeight: "100vh", padding: "14px 18px 60px" }}>
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 14,
+        }}
+      >
         <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{
-              width: 8, height: 8,
-              background: "var(--buy)",
-              borderRadius: "50%",
-              animation: "pulse 2s infinite",
-            }}/>
-            <h1 style={{ fontFamily: "var(--mono)", fontSize: 16, fontWeight: 500, letterSpacing: "0.04em" }}>
-              AI TRADING COPILOT
-            </h1>
+          <div
+            style={{
+              fontFamily: "var(--mono)",
+              fontSize: 10,
+              color: "var(--muted)",
+              letterSpacing: "0.12em",
+            }}
+          >
+            AUTONOMOUS CRYPTO TRADING · WELTBOT v1.0
           </div>
           {lastUpdate && (
-            <div style={{ color: "var(--muted)", fontSize: 11, marginTop: 3, fontFamily: "var(--mono)" }}>
-              last updated {lastUpdate} · auto-refresh 60s
+            <div
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 9,
+                color: "var(--dim)",
+                marginTop: 2,
+              }}
+            >
+              updated {lastUpdate} · auto-refresh 30s
             </div>
           )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={handleEvaluate}>Evaluate open trades</button>
-          <button onClick={load} disabled={loading}>
+          <button onClick={handleEvaluate} style={{ fontSize: 10 }}>
+            Check exits
+          </button>
+          <button onClick={load} disabled={loading} style={{ fontSize: 10 }}>
             {loading ? "Loading…" : "Refresh"}
           </button>
         </div>
       </div>
 
       {error && (
-        <div style={{
-          background: "rgba(240,107,122,0.08)",
-          border: "1px solid rgba(240,107,122,0.25)",
-          color: "var(--sell)",
-          padding: "12px 18px",
-          borderRadius: 8,
-          marginBottom: 20,
-          fontSize: 12,
-        }}>
+        <div
+          style={{
+            background: "rgba(255,77,106,0.08)",
+            border: "1px solid rgba(255,77,106,0.25)",
+            color: "var(--sell)",
+            padding: "10px 14px",
+            borderRadius: 8,
+            marginBottom: 14,
+            fontSize: 11,
+            fontFamily: "var(--mono)",
+          }}
+        >
           {error}
         </div>
       )}
 
-      <SummaryBar summary={summary} />
+      {/* Bot status */}
+      <div style={{ marginBottom: 14 }}>
+        <BotStatus
+          status={botStatus}
+          portfolio={portfolio}
+          onStart={handleStart}
+          onStop={handleStop}
+          onScan={handleScan}
+          loading={actionLoad}
+        />
+      </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 20 }}>
+      {/* Summary bar */}
+      <SummaryBar summary={summary} portfolio={portfolio} />
+
+      {/* Open positions */}
+      {portfolio?.positions?.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="label" style={{ marginBottom: 10 }}>
+            Open positions — {portfolio.positions.length} active
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
+              gap: 10,
+            }}
+          >
+            {portfolio.positions.map((p, i) => (
+              <PositionCard key={i} position={p} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Main grid */}
+      <div
+        style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 14 }}
+      >
         <div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16 }}>
-            {signals.map(data => (
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: 10,
+            }}
+          >
+            <div>
+              <span className="label">
+                Structure signals — {signals.length} assets monitored
+              </span>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "var(--muted)",
+                  marginTop: 2,
+                  fontFamily: "var(--mono)",
+                }}
+              >
+                BOS → Fib → OB → MA → Entry · all 5 conditions required
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {["BOS", "Fib", "OB", "MA", "Entry"].map((s) => (
+                <div
+                  key={s}
+                  style={{
+                    background: "var(--surface2)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    padding: "3px 8px",
+                    fontSize: 9,
+                    color: "var(--muted)",
+                    fontFamily: "var(--mono)",
+                  }}
+                >
+                  {s}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))",
+              gap: 10,
+              marginBottom: 4,
+            }}
+          >
+            {signals.map((data) => (
               <SignalCard
                 key={data.signal_data?.symbol}
                 data={data}
-                selected={selected?.signal_data?.symbol === data.signal_data?.symbol}
+                selected={
+                  selected?.signal_data?.symbol === data.signal_data?.symbol
+                }
                 onSelect={setSelected}
-                onExecute={handleExecute}
               />
             ))}
             {signals.length === 0 && !loading && !error && (
-              <div className="card" style={{ gridColumn: "1/-1", textAlign: "center", color: "var(--muted)", padding: 40 }}>
-                Loading signals — this takes 20–30 seconds on first load
+              <div
+                className="card"
+                style={{
+                  gridColumn: "1/-1",
+                  textAlign: "center",
+                  color: "var(--muted)",
+                  padding: 40,
+                  fontSize: 12,
+                }}
+              >
+                Warming signal cache — 30–60 seconds on first load
               </div>
             )}
           </div>
           <TradeLog trades={trades} />
         </div>
-
-        <RiskPanel selected={selected} />
+        <div>
+          <RiskPanel selected={selected} />
+        </div>
       </div>
 
       {toast && (
-        <div style={{
-          position: "fixed", bottom: 28, right: 28,
-          background: "var(--surface)",
-          border: "1px solid var(--bord2)",
-          padding: "10px 20px",
-          borderRadius: 8,
-          fontSize: 12,
-          fontFamily: "var(--mono)",
-          color: "var(--info)",
-          zIndex: 9999,
-        }}>
-          {toast}
+        <div
+          style={{
+            position: "fixed",
+            bottom: 24,
+            right: 24,
+            background: toast.isError
+              ? "rgba(255,77,106,0.15)"
+              : "var(--surface2)",
+            border: `1px solid ${toast.isError ? "rgba(255,77,106,0.3)" : "var(--border2)"}`,
+            padding: "10px 18px",
+            borderRadius: 8,
+            fontFamily: "var(--mono)",
+            fontSize: 11,
+            color: toast.isError ? "var(--sell)" : "var(--info)",
+            zIndex: 9999,
+          }}
+        >
+          {toast.msg}
         </div>
       )}
-
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.3; }
-        }
-      `}</style>
     </div>
   );
 }

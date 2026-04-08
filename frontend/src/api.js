@@ -4,11 +4,13 @@ const get  = (url) => fetch(`${BASE}${url}`).then(r => { if (!r.ok) throw new Er
 const post = (url) => fetch(`${BASE}${url}`, { method: "POST" }).then(r => r.json());
 
 export const api = {
+  getBotStatus:   ()    => get("/api/bot/status"),
+  startBot:       ()    => post("/api/bot/start"),
+  stopBot:        ()    => post("/api/bot/stop"),
+  scanNow:        ()    => post("/api/bot/scan-now"),
   getAllSignals:   ()    => get("/api/signals/"),
-  getSignal:      (sym) => get(`/api/signals/${sym}`),
-  executeSignal:  (sym) => post(`/api/signals/${sym}/execute`),
   getTrades:      ()    => get("/api/trades/"),
   evaluateTrades: ()    => post("/api/trades/evaluate"),
-  getAccuracy:    ()    => get("/api/trades/accuracy"),
   getSummary:     ()    => get("/api/analytics/summary"),
+  getPortfolio:   ()    => get("/api/analytics/portfolio"),
 };

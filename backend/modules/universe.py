@@ -1,0 +1,21 @@
+TESTNET_UNIVERSE = [
+    "BTC/USDT",  "ETH/USDT",  "BNB/USDT",  "SOL/USDT",
+    "XRP/USDT",  "ADA/USDT",  "DOGE/USDT", "AVAX/USDT",
+    "LINK/USDT", "UNI/USDT",  "LTC/USDT",  "ATOM/USDT",
+    "NEAR/USDT", "DOT/USDT",  "AAVE/USDT",
+]
+
+LIVE_UNIVERSE = [
+    "BTC/USDT",   "ETH/USDT",   "BNB/USDT",   "SOL/USDT",
+    "XRP/USDT",   "ADA/USDT",   "AVAX/USDT",  "DOGE/USDT",
+    "DOT/USDT",   "LINK/USDT",  "UNI/USDT",   "ATOM/USDT",
+    "LTC/USDT",   "NEAR/USDT",  "FIL/USDT",   "ALGO/USDT",
+    "ICP/USDT",   "APT/USDT",   "ARB/USDT",   "OP/USDT",
+    "INJ/USDT",   "TIA/USDT",   "SEI/USDT",   "SUI/USDT",
+    "PEPE/USDT",  "SHIB/USDT",  "WIF/USDT",   "JUP/USDT",
+    "AAVE/USDT",  "SNX/USDT",
+]
+
+def get_universe():
+    from config import BINANCE_TESTNET
+    return TESTNET_UNIVERSE if BINANCE_TESTNET else LIVE_UNIVERSE

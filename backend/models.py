@@ -4,20 +4,21 @@ from database import Base
 
 class Trade(Base):
     __tablename__ = "trades"
-    id          = Column(Integer, primary_key=True, index=True)
-    asset       = Column(String, index=True)
-    signal      = Column(String)
-    confidence  = Column(Float)
-    entry_price = Column(Float)
-    stop_loss   = Column(Float)
-    take_profit = Column(Float)
-    position_sz = Column(Float)
-    risk_usd    = Column(Float)
-    risk_reward = Column(Float)
-    outcome     = Column(String, default="OPEN")
-    pnl         = Column(Float, nullable=True)
-    created_at  = Column(DateTime(timezone=True), server_default=func.now())
-    closed_at   = Column(DateTime(timezone=True), nullable=True)
+    id               = Column(Integer, primary_key=True, index=True)
+    asset            = Column(String, index=True)
+    signal           = Column(String)
+    confidence       = Column(Float)
+    entry_price      = Column(Float)
+    stop_loss        = Column(Float)
+    take_profit      = Column(Float)
+    position_sz      = Column(Float)
+    risk_usd         = Column(Float)
+    risk_reward      = Column(Float)
+    outcome          = Column(String, default="OPEN")
+    pnl              = Column(Float, nullable=True)
+    binance_order_id = Column(String, nullable=True)
+    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+    closed_at        = Column(DateTime(timezone=True), nullable=True)
 
 class SignalAccuracy(Base):
     __tablename__ = "signal_accuracy"
@@ -36,3 +37,11 @@ class SignalCache(Base):
     asset      = Column(String, unique=True, index=True)
     payload    = Column(String)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class BotState(Base):
+    __tablename__ = "bot_state"
+    id          = Column(Integer, primary_key=True)
+    is_running  = Column(Integer, default=0)
+    paused      = Column(Integer, default=0)
+    pause_reason= Column(String, nullable=True)
+    updated_at  = Column(DateTime(timezone=True), server_default=func.now())

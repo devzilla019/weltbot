@@ -1,93 +1,166 @@
 from textblob import TextBlob
-import random
+import requests
 import time
+import random
 
 FINANCIAL_KEYWORDS = {
-    "etf approval":      +0.40,
-    "institutional buy": +0.35,
-    "short squeeze":     +0.30,
-    "earnings beat":     +0.30,
-    "upgrade":           +0.20,
-    "sec investigation": -0.45,
-    "bankruptcy":        -0.50,
-    "hack":              -0.40,
-    "earnings miss":     -0.35,
-    "downgrade":         -0.25,
-    "delisted":          -0.60,
+    "surge":         +0.30,
+    "rally":         +0.25,
+    "bullish":       +0.35,
+    "adoption":      +0.25,
+    "partnership":   +0.20,
+    "upgrade":       +0.20,
+    "listing":       +0.15,
+    "etf":           +0.30,
+    "institutional": +0.25,
+    "hack":          -0.50,
+    "ban":           -0.45,
+    "crash":         -0.40,
+    "bearish":       -0.35,
+    "sec":           -0.30,
+    "fraud":         -0.50,
+    "bankrupt":      -0.60,
+    "dump":          -0.30,
+    "sell":          -0.15,
+    "fear":          -0.25,
+    "warning":       -0.20,
 }
 
-MOCK_POOL = {
-    "BTC-USD": [
-        ("Bitcoin surges past key resistance as institutions accumulate", 0),
-        ("Crypto market rallies amid positive macro outlook", 1),
-        ("Bitcoin ETF inflows hit record high this week", 2),
-        ("Bitcoin dips as profit-taking hits market", 8),
-        ("Regulatory clarity boosts crypto confidence", 4),
+# Realistic mock headlines per asset — used as fallback
+MOCK_HEADLINES = {
+    "BTC": [
+        "Bitcoin institutional demand rising as ETF inflows hit record",
+        "BTC breaks key resistance level amid positive macro outlook",
+        "Bitcoin network hash rate reaches all time high",
+        "Whale wallets accumulating BTC at current price levels",
     ],
-    "ETH-USD": [
-        ("Ethereum network activity reaches all-time high", 0),
-        ("ETH staking rewards attract long-term holders", 3),
-        ("Layer 2 adoption drives Ethereum demand", 6),
-        ("Ethereum faces selling pressure ahead of upgrade", 10),
+    "ETH": [
+        "Ethereum staking yields continue attracting long term holders",
+        "ETH layer 2 transaction volume hits new record",
+        "Ethereum developer activity remains strong this quarter",
+        "ETH burns accelerate reducing circulating supply",
     ],
-    "AAPL": [
-        ("Apple reports record revenue driven by services", 1),
-        ("iPhone demand softens in key markets", 5),
-        ("Apple AI features to launch this quarter", 2),
-        ("Apple faces antitrust probe in EU", 8),
+    "SOL": [
+        "Solana DeFi ecosystem TVL growing rapidly",
+        "SOL network uptime improves significantly after upgrades",
+        "Solana memecoin activity drives fee revenue higher",
     ],
-    "MSFT": [
-        ("Microsoft cloud growth beats expectations", 0),
-        ("Azure AI revenue doubles year over year", 2),
-        ("Microsoft faces antitrust scrutiny over acquisition", 12),
+    "BNB": [
+        "BNB chain activity increases with new DeFi protocols",
+        "Binance reports strong quarterly trading volumes",
     ],
-    "NVDA": [
-        ("NVIDIA data center sales shatter records", 0),
-        ("GPU demand continues to outstrip supply", 3),
-        ("NVIDIA guidance raises Wall Street targets", 1),
-        ("NVIDIA faces export control restrictions", 6),
+    "XRP": [
+        "XRP legal clarity boosts institutional interest",
+        "Ripple partnership expands cross border payment network",
+    ],
+    "ADA": [
+        "Cardano smart contract activity growing steadily",
+        "ADA staking participation reaches new high",
+    ],
+    "AVAX": [
+        "Avalanche subnet adoption accelerating across enterprises",
+        "AVAX DeFi TVL recovering strongly",
+    ],
+    "DOGE": [
+        "Dogecoin payment adoption growing among merchants",
+        "DOGE social sentiment remains elevated",
+    ],
+    "LINK": [
+        "Chainlink oracle network expands to new blockchains",
+        "LINK staking v0.2 attracting significant deposits",
+    ],
+    "UNI": [
+        "Uniswap v4 launch drives protocol fee growth",
+        "UNI governance vote passes new fee switch proposal",
     ],
 }
 
-_cache = {}
+DEFAULT_HEADLINES = [
+    "Crypto market shows mixed signals amid macro uncertainty",
+    "Digital asset trading volumes remain steady this week",
+    "Blockchain adoption continues across emerging markets",
+]
 
-def _apply_keyword_boost(text, base):
+_cache: dict = {}
+_TTL = 600  # 10 minutes
+
+
+def _fetch_alternative_news(symbol_base: str) -> list:
+    feeds = [
+        "https://cointelegraph.com/rss",
+        "https://coindesk.com/arc/outboundfeeds/rss/",
+    ]
+    headlines = []
+    for feed_url in feeds:
+        try:
+            resp = requests.get(feed_url, timeout=4, headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                continue
+            import re
+            titles = re.findall(r"<title><!\[CDATA\[(.*?)\]\]></title>", resp.text)
+            if not titles:
+                titles = re.findall(r"<title>(.*?)</title>", resp.text)
+            sym = symbol_base.upper()
+            full = sym if len(sym) > 3 else sym
+            for title in titles[:40]:
+                t = title.strip()
+                if sym in t.upper() or "CRYPTO" in t.upper() or "BITCOIN" in t.upper() and sym == "BTC":
+                    headlines.append((t, 1))
+            if headlines:
+                break
+        except Exception:
+            continue
+    return headlines[:5]
+
+def _apply_keyword_boost(text: str, base: float) -> float:
     boost = 0.0
     lower = text.lower()
     for kw, weight in FINANCIAL_KEYWORDS.items():
         if kw in lower:
             boost += weight
-    return max(-1.0, min(1.0, base + boost * 0.5))
+    return max(-1.0, min(1.0, base + boost * 0.4))
 
-def _recency_weight(hours_ago):
-    if hours_ago <= 2:
-        return 1.0
-    if hours_ago <= 12:
-        return 0.6
+
+def _recency_weight(hours_ago: int) -> float:
+    if hours_ago <= 2:  return 1.0
+    if hours_ago <= 12: return 0.6
     return 0.3
 
-def get_sentiment(symbol, ttl_seconds=300):
-    now = time.time()
-    if symbol in _cache and (now - _cache[symbol]["ts"]) < ttl_seconds:
-        return _cache[symbol]["data"]
-    pool      = MOCK_POOL.get(symbol, [("Market conditions remain mixed", 4)])
-    headlines = random.sample(pool, min(4, len(pool)))
+
+def get_sentiment(symbol: str) -> dict:
+    base = symbol.replace("/USDT", "").replace("-USD", "").upper()
+    now  = time.time()
+
+    if base in _cache and (now - _cache[base]["ts"]) < _TTL:
+        return _cache[base]["data"]
+
+    # Try real RSS first
+    headlines = _fetch_alternative_news(base)
+
+    # Fall back to mock if nothing found
+    if not headlines:
+        pool      = MOCK_HEADLINES.get(base, DEFAULT_HEADLINES)
+        headlines = [(h, random.randint(1, 6)) for h in random.sample(pool, min(3, len(pool)))]
+
     weighted_sum = 0.0
     weight_total = 0.0
+
     for text, hours_ago in headlines:
-        base    = TextBlob(text).sentiment.polarity
-        boosted = _apply_keyword_boost(text, base)
-        w       = _recency_weight(hours_ago)
+        base_score = TextBlob(text).sentiment.polarity
+        boosted    = _apply_keyword_boost(text, base_score)
+        w          = _recency_weight(hours_ago)
         weighted_sum += boosted * w
         weight_total += w
+
     avg   = weighted_sum / weight_total if weight_total > 0 else 0.0
-    label = "bullish" if avg > 0.10 else ("bearish" if avg < -0.10 else "neutral")
+    label = "bullish" if avg > 0.08 else ("bearish" if avg < -0.08 else "neutral")
+
     result = {
         "symbol": symbol,
         "score":  round(avg, 4),
         "label":  label,
         "count":  len(headlines),
-        "sample": [h[0] for h in headlines[:2]],
+        "source": "rss" if headlines else "mock",
     }
-    _cache[symbol] = {"ts": now, "data": result}
+    _cache[base] = {"ts": now, "data": result}
     return result

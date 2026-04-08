@@ -1,26 +1,25 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap');
 
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:      #0c0e14;
-  --surface: #13161f;
-  --sur2:    #1a1e2a;
-  --border:  rgba(255,255,255,0.07);
-  --bord2:   rgba(255,255,255,0.13);
-  --text:    #d4daf0;
-  --muted:   #5a6080;
-  --buy:     #52d68a;
-  --sell:    #f06b7a;
-  --hold:    #f0a050;
-  --info:    #60aaff;
-  --mono:    'JetBrains Mono', monospace;
-  --sans:    'DM Sans', sans-serif;
-  --radius:  10px;
+  --bg:       #080a0f;
+  --surface:  #0f1218;
+  --surface2: #161b24;
+  --surface3: #1c2330;
+  --border:   rgba(255,255,255,0.06);
+  --border2:  rgba(255,255,255,0.12);
+  --text:     #e2e8f4;
+  --muted:    #4a5470;
+  --dim:      #2a3048;
+  --buy:      #00d084;
+  --sell:     #ff4d6a;
+  --hold:     #f5a623;
+  --info:     #4d9fff;
+  --purple:   #9b6dff;
+  --mono:     'JetBrains Mono', monospace;
+  --sans:     'DM Sans', sans-serif;
+  --r:        10px;
 }
 
 body {
@@ -35,8 +34,25 @@ body {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px;
+  border-radius: var(--r);
+  padding: 16px;
+}
+
+.card2 {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 14px;
+}
+
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .tag {
@@ -44,18 +60,19 @@ body {
   align-items: center;
   font-family: var(--mono);
   font-size: 10px;
-  font-weight: 500;
-  padding: 3px 9px;
+  font-weight: 600;
+  padding: 2px 8px;
   border-radius: 4px;
   letter-spacing: 0.06em;
   border: 1px solid;
 }
-.tag.BUY  { background: rgba(82,214,138,0.12); color: var(--buy);  border-color: rgba(82,214,138,0.3); }
-.tag.SELL { background: rgba(240,107,122,0.12); color: var(--sell); border-color: rgba(240,107,122,0.3); }
-.tag.HOLD { background: rgba(240,160,80,0.12);  color: var(--hold); border-color: rgba(240,160,80,0.3); }
-.tag.WIN  { background: rgba(82,214,138,0.12);  color: var(--buy);  border-color: rgba(82,214,138,0.2); }
-.tag.LOSS { background: rgba(240,107,122,0.12); color: var(--sell); border-color: rgba(240,107,122,0.2); }
-.tag.OPEN { background: rgba(96,170,255,0.10);  color: var(--info); border-color: rgba(96,170,255,0.2); }
+.tag.BUY  { background: rgba(0,208,132,0.1);  color: var(--buy);  border-color: rgba(0,208,132,0.3); }
+.tag.SELL { background: rgba(255,77,106,0.1);  color: var(--sell); border-color: rgba(255,77,106,0.3); }
+.tag.HOLD { background: rgba(245,166,35,0.1);  color: var(--hold); border-color: rgba(245,166,35,0.3); }
+.tag.WIN  { background: rgba(0,208,132,0.1);   color: var(--buy);  border-color: rgba(0,208,132,0.25); }
+.tag.LOSS { background: rgba(255,77,106,0.1);  color: var(--sell); border-color: rgba(255,77,106,0.25); }
+.tag.OPEN { background: rgba(77,159,255,0.1);  color: var(--info); border-color: rgba(77,159,255,0.25); }
+.tag.testnet { background: rgba(155,109,255,0.12); color: var(--purple); border-color: rgba(155,109,255,0.3); }
 
 button {
   font-family: var(--mono);
@@ -64,33 +81,33 @@ button {
   border-radius: 6px;
   padding: 7px 16px;
   transition: all 0.15s;
-  border: 1px solid var(--bord2);
+  border: 1px solid var(--border2);
   background: transparent;
   color: var(--muted);
 }
 button:hover { border-color: var(--info); color: var(--info); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-button.primary {
-  background: var(--buy);
-  color: #0c0e14;
-  border-color: var(--buy);
-  font-weight: 500;
+.btn-start {
+  background: rgba(0,208,132,0.12);
+  color: var(--buy);
+  border-color: rgba(0,208,132,0.35);
+  font-weight: 600;
 }
-button.primary:hover { opacity: 0.85; }
+.btn-start:hover { background: rgba(0,208,132,0.2); }
 
-button.danger {
-  background: rgba(240,107,122,0.12);
+.btn-stop {
+  background: rgba(255,77,106,0.1);
   color: var(--sell);
-  border-color: rgba(240,107,122,0.3);
+  border-color: rgba(255,77,106,0.3);
+}
+.btn-stop:hover { background: rgba(255,77,106,0.2); }
+
+.btn-scan {
+  background: rgba(77,159,255,0.1);
+  color: var(--info);
+  border-color: rgba(77,159,255,0.3);
 }
 
-.mono { font-family: var(--mono); }
-.muted { color: var(--muted); }
-
-.label {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
