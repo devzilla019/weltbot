@@ -45,3 +45,19 @@ class BotState(Base):
     paused      = Column(Integer, default=0)
     pause_reason= Column(String, nullable=True)
     updated_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+class ActiveSetup(Base):
+    __tablename__ = "active_setups"
+    id          = Column(Integer, primary_key=True)
+    symbol      = Column(String, unique=True, index=True)
+    direction   = Column(String)
+    bos_level   = Column(Float)
+    fib_high    = Column(Float)
+    fib_low     = Column(Float)
+    ob_high     = Column(Float)
+    ob_low      = Column(Float)
+    impulse_high= Column(Float)
+    impulse_low = Column(Float)
+    candles_age = Column(Integer, default=0)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at  = Column(DateTime(timezone=True), server_default=func.now())

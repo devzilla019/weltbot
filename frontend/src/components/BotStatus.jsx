@@ -129,6 +129,35 @@ export default function BotStatus({
         </button>
       </div>
 
+      {status.active_setups?.length > 0 && (
+        <div style={{ marginTop: 4 }}>
+          <div className="label" style={{ marginBottom: 6 }}>
+            Active setups — waiting for entry
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {status.active_setups.map((sym, i) => (
+              <div
+                key={i}
+                style={{
+                  background: "rgba(155,109,255,0.12)",
+                  border: "1px solid rgba(155,109,255,0.3)",
+                  borderRadius: 4,
+                  padding: "3px 10px",
+                  fontSize: 10,
+                  color: "var(--purple)",
+                  fontFamily: "var(--mono)",
+                }}
+              >
+                {sym.replace("/USDT", "")}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
+            L2 entry watcher checking every 60s
+          </div>
+        </div>
+      )}
+
       {status.last_scan?.length > 0 && (
         <div>
           <div className="label" style={{ marginBottom: 8 }}>
