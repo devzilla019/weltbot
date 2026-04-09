@@ -255,9 +255,21 @@ scheduler.start()
 async def startup():
     print(f"[weltbot] v3.0 starting — testnet={BINANCE_TESTNET}")
     threading.Thread(target=refresh_signal_cache, daemon=True).start()
-    threading.Thread(target=level1_bos_scan, daemon=True).start()
+    threading.Thread(target=level1_bos_scan,      daemon=True).start()
+    threading.Thread(target=_keep_alive,          daemon=True).start()
 
-
+def _keep_alive():
+    import time
+    import requests as req
+    url = "https://weltbot-backend.onrender.com"
+    while True:
+        time.sleep(840)
+        try:
+            req.get(f"{url}/", timeout=10)
+            print("[keep-alive] ping sent")
+        except Exception:
+            pass
+        
 @app.on_event("shutdown")
 async def shutdown():
     scheduler.shutdown()
