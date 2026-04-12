@@ -97,95 +97,115 @@ def _place_trade(sig, balance, db):
 
 
 def level1_bos_scan():
-    """
-    Runs every 15 minutes.
-    Scans all symbols for BOS + Fib + OB + MA.
-    Stores confirmed setups in _active_setups for fast entry checking.
-    """
     global _active_setups
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
         if not state.is_running or state.paused:
             return
+        from modules.universe      import get_universe
+        from modules.signal_engine import scan_for_bos, ema_momentum_scan, rsi_reversal_scan
 
-        from modules.universe import get_universe
-        from modules.signal_engine import scan_for_bos
-
-        balance = safe_get_balance()
+        balance    = safe_get_balance()
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
-        print(f"[L1] BOS scan — balance=${balance:.2f} open={open_count}/{MAX_OPEN_TRADES}")
+        slots      = MAX_OPEN_TRADES - open_count
+        print(f"[L1] scanning — balance=${balance:.2f} open={open_count}/{MAX_OPEN_TRADES}")
 
-        new_setups = {}
+        if slots <= 0:
+            return
+
+        new_setups = dict(_active_setups)
+
         for symbol in get_universe():
+            if symbol in new_setups:
+                age = new_setups[symbol].get("candle_age", 0) + 1
+                if age > 15:
+                    print(f"[L1] {symbol} fib expired — removing")
+                    del new_setups[symbol]
+                    continue
+                new_setups[symbol]["candle_age"] = age
+                continue
+
             try:
                 setup = scan_for_bos(symbol)
                 if setup:
-                    if symbol in _active_setups:
-                        setup["candle_age"] = _active_setups[symbol].get("candle_age", 0) + 1
-                    else:
-                        setup["candle_age"] = 0
-                    if setup["candle_age"] > 15:
-                        print(f"[L1] {symbol} fib expired after 15 candles — removing")
-                        continue
                     new_setups[symbol] = setup
-                    print(
-                        f"[L1] SETUP FOUND: {symbol} {setup['direction'].upper()} "
-                        f"age={setup['candle_age']}/15"
-                    )
+                    continue
+
+                mom = ema_momentum_scan(symbol)
+                if mom:
+                    new_setups[symbol] = {
+                        "symbol":    symbol,
+                        "direction": "bullish" if mom["signal"]=="BUY" else "bearish",
+                        "timeframe": "5m",
+                        "bos":       mom["bos"],
+                        "fib":       mom["fib"],
+                        "ob":        mom["ob"],
+                        "candle_age": 0,
+                        "strategy":  "EMA_MOMENTUM",
+                        "direct_signal": mom,
+                    }
+                    continue
+
+                rsi = rsi_reversal_scan(symbol)
+                if rsi:
+                    new_setups[symbol] = {
+                        "symbol":    symbol,
+                        "direction": "bullish" if rsi["signal"]=="BUY" else "bearish",
+                        "timeframe": "5m",
+                        "bos":       rsi["bos"],
+                        "fib":       rsi["fib"],
+                        "ob":        rsi["ob"],
+                        "candle_age": 0,
+                        "strategy":  "RSI_REVERSAL",
+                        "direct_signal": rsi,
+                    }
             except Exception as e:
                 print(f"[L1] error {symbol}: {e}")
 
         _active_setups = new_setups
-        print(f"[L1] scan done — {len(new_setups)} active setups: {list(new_setups.keys())}")
+        print(f"[L1] done — {len(new_setups)} active: {list(new_setups.keys())}")
 
     except Exception as e:
         print(f"[L1] cycle error: {e}")
     finally:
         db.close()
 
-
 def level2_entry_check():
-    """
-    Runs every 60 seconds.
-    Only checks symbols with confirmed BOS + Fib + OB.
-    Fires trade when entry candle appears.
-    Much faster — only 3-5 API calls instead of 45.
-    """
     global _active_setups
     if not _active_setups:
         return
-
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
         if not state.is_running or state.paused:
             return
-
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
         if open_count >= MAX_OPEN_TRADES:
             return
-
         balance = safe_get_balance()
         if balance < 1.0:
             return
-
         from modules.signal_engine import check_entry_for_setup
         from modules.position_manager import daily_drawdown_check
-
         if daily_drawdown_check():
             state.paused = 1
             state.pause_reason = "Daily drawdown limit hit"
             db.commit()
             return
-
-        slots = MAX_OPEN_TRADES - open_count
+        slots  = MAX_OPEN_TRADES - open_count
         placed = 0
-
         for symbol, setup in list(_active_setups.items()):
             if placed >= slots:
                 break
             try:
+                direct = setup.get("direct_signal")
+                if direct:
+                    success = _place_trade(direct, balance, db)
+                    if success:
+                        placed += 1
+                        del _active_setups[symbol]
+                    continue
                 sig = check_entry_for_setup(setup)
                 if sig:
                     success = _place_trade(sig, balance, db)
@@ -194,15 +214,12 @@ def level2_entry_check():
                         del _active_setups[symbol]
             except Exception as e:
                 print(f"[L2] error {symbol}: {e}")
-
         if placed > 0:
-            print(f"[L2] entry check done — {placed} trades placed")
-
+            print(f"[L2] {placed} trades placed")
     except Exception as e:
         print(f"[L2] cycle error: {e}")
     finally:
         db.close()
-
 
 def check_positions():
     try:
@@ -275,9 +292,9 @@ async def shutdown():
     scheduler.shutdown()
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
-    return {"status": "ok", "name": "WeltBot", "version": "3.0.0"}
+    return {"status": "ok", "name": "WeltBot", "version": "4.0.0"}
 
 
 @app.get("/api/bot/status")
