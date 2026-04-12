@@ -7,12 +7,21 @@ import time
 from urllib.parse import urlencode
 from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET
 
-TESTNET_BASE = "https://testnet.binance.vision"
-MAINNET_BASE = "https://api.binance.com"
-BASE_URL     = TESTNET_BASE if BINANCE_TESTNET else MAINNET_BASE
+# ─── URLs ─────────────────────────────────────────────────────────────────────
+# Market data (candles, prices) — always mainnet public, no auth needed
+MARKET_DATA_URL = "https://fapi.binance.com"
 
+# Order execution — testnet for paper trading, mainnet for real money
+FUTURES_DEMO_URL    = "https://demo-fapi.binance.com"
+FUTURES_MAINNET_URL = "https://fapi.binance.com"
+EXEC_URL = FUTURES_DEMO_URL if BINANCE_TESTNET else FUTURES_MAINNET_URL
+
+# ─── BALANCE CACHE ────────────────────────────────────────────────────────────
 _cached_balance = 0.0
 _balance_ts     = 0.0
+
+# ─── LOT SIZE CACHE ───────────────────────────────────────────────────────────
+_lot_cache: dict = {}
 
 
 def _get_headers():
@@ -29,7 +38,10 @@ def _sign(params: dict) -> dict:
     return params
 
 
+# ─── BALANCE ──────────────────────────────────────────────────────────────────
+
 def get_balance() -> float:
+    """Get available USDT balance from futures wallet."""
     global _cached_balance, _balance_ts
     now = time.time()
     if _cached_balance > 0 and (now - _balance_ts) < 60:
@@ -38,32 +50,43 @@ def get_balance() -> float:
         try:
             params = _sign({})
             resp   = requests.get(
-                f"{BASE_URL}/api/v3/account",
-                params  = params,
-                headers = _get_headers(),
-                timeout = 15,
+                f"{EXEC_URL}/fapi/v2/balance",
+                params=params, headers=_get_headers(), timeout=15,
             )
             data = resp.json()
-            for b in data.get("balances", []):
-                if b["asset"] == "USDT":
-                    val = float(b["free"])
-                    if val >= 0:
-                        _cached_balance = val
-                        _balance_ts     = now
-                    return _cached_balance
+            if isinstance(data, list):
+                for asset in data:
+                    if asset.get("asset") == "USDT":
+                        val = float(asset.get("availableBalance", 0))
+                        if val >= 0:
+                            _cached_balance = val
+                            _balance_ts     = now
+                        return _cached_balance
+            # Fallback for different response format
+            if isinstance(data, dict) and "availableBalance" in data:
+                val = float(data["availableBalance"])
+                _cached_balance = val
+                _balance_ts     = now
+                return val
         except Exception as e:
             print(f"[market_data] balance error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return _cached_balance
 
 
+def get_asset_balance(asset: str) -> float:
+    """Not needed for futures — always returns 0 (we use USDT margin)."""
+    return 0.0
+
+
+# ─── MARKET DATA (mainnet public) ─────────────────────────────────────────────
+
 def get_ticker_price(symbol: str) -> float:
     try:
         sym  = symbol.replace("/", "")
         resp = requests.get(
-            f"{BASE_URL}/api/v3/ticker/price",
-            params  = {"symbol": sym},
-            timeout = 8,
+            f"{MARKET_DATA_URL}/fapi/v1/ticker/price",
+            params={"symbol": sym}, timeout=8,
         )
         return float(resp.json().get("price", 0))
     except Exception as e:
@@ -72,18 +95,19 @@ def get_ticker_price(symbol: str) -> float:
 
 
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
+    """Fetch candles from mainnet futures — reliable, no auth, no rate limit issues."""
     for attempt in range(3):
         try:
             sym  = symbol.replace("/", "")
             resp = requests.get(
-                f"{BASE_URL}/api/v3/klines",
-                params  = {"symbol": sym, "interval": interval, "limit": limit},
-                timeout = 12,
+                f"{MARKET_DATA_URL}/fapi/v1/klines",
+                params={"symbol": sym, "interval": interval, "limit": limit},
+                timeout=12,
             )
             data = resp.json()
             if not isinstance(data, list) or len(data) < 10:
                 if attempt < 2:
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
                 return pd.DataFrame()
             df = pd.DataFrame(data, columns=[
@@ -98,11 +122,11 @@ def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFr
         except Exception as e:
             print(f"[market_data] fetch error {symbol} (attempt {attempt+1}): {e}")
             if attempt < 2:
-                time.sleep(2)
+                time.sleep(1)
     return pd.DataFrame()
 
 
-_lot_cache: dict = {}
+# ─── LOT SIZE ─────────────────────────────────────────────────────────────────
 
 def get_lot_size_rules(symbol: str) -> dict:
     sym = symbol.replace("/", "")
@@ -110,93 +134,124 @@ def get_lot_size_rules(symbol: str) -> dict:
         return _lot_cache[sym]
     try:
         resp = requests.get(
-            f"{BASE_URL}/api/v3/exchangeInfo",
-            params={"symbol": sym},
+            f"{MARKET_DATA_URL}/fapi/v1/exchangeInfo",
             timeout=10,
         )
         data = resp.json()
         for s in data.get("symbols", []):
             if s["symbol"] == sym:
-                rules = {"min_qty": 0.0, "step_size": 0.0, "min_notional": 0.0}
+                rules = {"min_qty": 0.001, "step_size": 0.001,
+                         "min_notional": 5.0, "tick_size": 0.01}
                 for f in s.get("filters", []):
                     if f["filterType"] == "LOT_SIZE":
                         rules["min_qty"]   = float(f["minQty"])
                         rules["step_size"] = float(f["stepSize"])
-                    if f["filterType"] == "NOTIONAL":
-                        rules["min_notional"] = float(f.get("minNotional", 0))
                     if f["filterType"] == "MIN_NOTIONAL":
-                        rules["min_notional"] = float(f.get("minNotional", 0))
+                        rules["min_notional"] = float(f.get("notional", 5.0))
+                    if f["filterType"] == "PRICE_FILTER":
+                        rules["tick_size"] = float(f.get("tickSize", 0.01))
                 _lot_cache[sym] = rules
                 return rules
     except Exception as e:
         print(f"[market_data] lot size error {symbol}: {e}")
-    return {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
+    default = {"min_qty": 0.001, "step_size": 0.001,
+               "min_notional": 5.0, "tick_size": 0.01}
+    _lot_cache[sym] = default
+    return default
 
 
 def round_step_size(quantity: float, step_size: float) -> float:
+    import math
     if step_size <= 0:
         return quantity
-    import math
     precision = int(round(-math.log10(step_size)))
     factor    = 10 ** precision
     return math.floor(quantity * factor) / factor
 
 
+# ─── ORDER PLACEMENT (futures) ────────────────────────────────────────────────
+
+def set_leverage(symbol: str, leverage: int = 5):
+    """Set leverage for a futures symbol."""
+    try:
+        sym    = symbol.replace("/", "")
+        params = _sign({"symbol": sym, "leverage": leverage})
+        resp   = requests.post(
+            f"{EXEC_URL}/fapi/v1/leverage",
+            params=params, headers=_get_headers(), timeout=10,
+        )
+        data = resp.json()
+        print(f"[market_data] leverage set {sym} {leverage}x: {data.get('leverage', '?')}x")
+    except Exception as e:
+        print(f"[market_data] leverage error {symbol}: {e}")
+
+
 def place_order_raw(symbol: str, side: str, quantity: float) -> dict:
+    """
+    Place a futures market order.
+    BUY  = LONG position
+    SELL = SHORT position (this works on futures, not spot)
+    """
     try:
         sym   = symbol.replace("/", "")
         rules = get_lot_size_rules(symbol)
-
-        step      = rules["step_size"]
-        min_qty   = rules["min_qty"]
-        min_notl  = rules["min_notional"]
-        price     = get_ticker_price(symbol)
+        step  = rules["step_size"]
+        min_q = rules["min_qty"]
+        price = get_ticker_price(symbol)
 
         qty = round_step_size(quantity, step)
+        if qty < min_q:
+            qty = min_q
 
-        if qty < min_qty:
-            qty = min_qty
-
-        if price > 0 and qty * price < min_notl:
-            qty = round_step_size(min_notl / price * 1.01, step)
-            if qty < min_qty:
-                qty = min_qty
+        # Futures position side
+        pos_side = "LONG" if side.upper() == "BUY" else "SHORT"
 
         qty_str = f"{qty:.8f}".rstrip("0").rstrip(".")
-        print(f"[market_data] placing {side} {qty_str} {sym} (step={step} min={min_qty})")
+        print(f"[market_data] placing {side} {qty_str} {sym} futures")
 
         params = _sign({
-            "symbol":        sym,
-            "side":          side.upper(),
-            "type":          "MARKET",
-            "quantity":      qty_str,
-            "recvWindow":    20000,
+            "symbol":       sym,
+            "side":         side.upper(),
+            "type":         "MARKET",
+            "quantity":     qty_str,
+            "recvWindow":   20000,
         })
         resp = requests.post(
-            f"{BASE_URL}/api/v3/order",
-            params  = params,
-            headers = _get_headers(),
-            timeout = 15,
+            f"{EXEC_URL}/fapi/v1/order",
+            params=params, headers=_get_headers(), timeout=15,
         )
         data = resp.json()
-        if "code" in data:
+
+        if "code" in data and data["code"] < 0:
             print(f"[market_data] order error: {data}")
             return {"success": False, "error": data.get("msg", str(data))}
 
-        fills      = data.get("fills", [])
-        fill_price = float(fills[0]["price"]) if fills else price
+        avg_price = float(data.get("avgPrice", 0)) or price
         qty_filled = float(data.get("executedQty", qty))
 
         return {
             "success":    True,
             "order_id":   str(data.get("orderId", "")),
-            "fill_price": fill_price,
+            "fill_price": avg_price,
             "qty_filled": qty_filled,
             "raw":        data,
         }
     except Exception as e:
         print(f"[market_data] place_order_raw error: {e}")
         return {"success": False, "error": str(e)}
+
+
+def close_futures_position(symbol: str, side: str, quantity: float) -> dict:
+    """
+    Close a futures position by placing the opposite side order.
+    If we BOUGHT (LONG) → close with SELL
+    If we SOLD  (SHORT) → close with BUY
+    """
+    close_side = "SELL" if side == "BUY" else "BUY"
+    return place_order_raw(symbol, close_side, quantity)
+
+
+# ─── TECHNICAL INDICATORS ─────────────────────────────────────────────────────
 
 def compute_rsi(close: pd.Series, period: int = 14) -> float:
     if len(close) < period + 1:
@@ -278,7 +333,7 @@ def detect_volume_anomaly(volume: pd.Series, close: pd.Series, lookback: int = 1
 def get_market_snapshot(symbol: str) -> dict:
     df = fetch_ohlcv(symbol, limit=60)
     if df.empty or len(df) < 30:
-        return {"error": f"Insufficient data for {symbol} (got {len(df)} candles)"}
+        return {"error": f"Insufficient data for {symbol}"}
     close    = df["close"]
     volume   = df["volume"]
     price    = round(float(close.iloc[-1]), 8)
@@ -300,11 +355,4 @@ def get_market_snapshot(symbol: str) -> dict:
         "macd":       macd_val,
         "macd_score": score_macd(macd_val["histogram"], price),
         "trend":      trend,
-    }
-def fetch_multi_tf(symbol: str) -> dict:
-    """Fetch 15m, 5m, and 1m candles for structure analysis."""
-    return {
-        "15m": fetch_ohlcv(symbol, interval="15m", limit=50),
-        "5m":  fetch_ohlcv(symbol, interval="5m",  limit=30),
-        "1m":  fetch_ohlcv(symbol, interval="1m",  limit=20),
     }

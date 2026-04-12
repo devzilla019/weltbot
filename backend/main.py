@@ -262,7 +262,8 @@ def refresh_signal_cache():
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_positions, "interval", minutes=2)
-scheduler.add_job(level2_entry_check, "interval", seconds=60)
+scheduler.add_job(level2_entry_check, "interval", seconds=60,
+                  max_instances=3, coalesce=True, misfire_grace_time=30)
 scheduler.add_job(level1_bos_scan, "interval", minutes=SCAN_INTERVAL_MIN)
 scheduler.add_job(refresh_signal_cache, "interval", minutes=10)
 scheduler.start()
