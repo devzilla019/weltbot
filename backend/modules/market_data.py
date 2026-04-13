@@ -8,13 +8,30 @@ from urllib.parse import urlencode
 from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET
 
 # ─── URLs ─────────────────────────────────────────────────────────────────────
-# Market data (candles, prices) — always mainnet public, no auth needed
+# Market data — mainnet futures public API (no auth required)
 MARKET_DATA_URL = "https://fapi.binance.com"
 
-# Order execution — testnet for paper trading, mainnet for real money
+# Execution — demo trading for paper, mainnet for real
+# Note: demo-fapi may not resolve from all servers — use fallback
 FUTURES_DEMO_URL    = "https://demo-fapi.binance.com"
 FUTURES_MAINNET_URL = "https://fapi.binance.com"
-EXEC_URL = FUTURES_DEMO_URL if BINANCE_TESTNET else FUTURES_MAINNET_URL
+
+def _get_exec_url():
+    import os
+    env_url = os.getenv("FUTURES_EXEC_URL", "").strip()
+    if env_url:
+        return env_url
+    if not BINANCE_TESTNET:
+        return FUTURES_MAINNET_URL
+    import socket
+    try:
+        socket.getaddrinfo("demo-fapi.binance.com", 443)
+        return FUTURES_DEMO_URL
+    except Exception:
+        print("[market_data] demo-fapi DNS failed — using testnet.binancefuture.com")
+        return "https://testnet.binancefuture.com"
+
+EXEC_URL = _get_exec_url()
 
 # ─── BALANCE CACHE ────────────────────────────────────────────────────────────
 _cached_balance = 0.0
@@ -86,7 +103,7 @@ def get_ticker_price(symbol: str) -> float:
         sym  = symbol.replace("/", "")
         resp = requests.get(
             f"{MARKET_DATA_URL}/fapi/v1/ticker/price",
-            params={"symbol": sym}, timeout=8,
+            params={"symbol": sym}, timeout=12,
         )
         return float(resp.json().get("price", 0))
     except Exception as e:
@@ -102,7 +119,7 @@ def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFr
             resp = requests.get(
                 f"{MARKET_DATA_URL}/fapi/v1/klines",
                 params={"symbol": sym, "interval": interval, "limit": limit},
-                timeout=12,
+                timeout=20,
             )
             data = resp.json()
             if not isinstance(data, list) or len(data) < 10:

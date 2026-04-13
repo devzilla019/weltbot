@@ -129,6 +129,12 @@ def level1_bos_scan():
             try:
                 setup = scan_for_bos(symbol)
                 if setup:
+                    setup["zone_check"]={
+                        "fib_low": setup["fib"]["zone_low"],
+                        "fib_high": setup["fib"]["zone_high"],
+                        "ob_low": setup["ob"]["zone_low"],
+                        "ob_high": setup["ob"]["zone_high"],
+                    }
                     new_setups[symbol] = setup
                     continue
 
@@ -170,52 +176,92 @@ def level1_bos_scan():
         print(f"[L1] cycle error: {e}")
     finally:
         db.close()
-
+from modules.market_data import get_ticker_price
 def level2_entry_check():
     global _active_setups
     if not _active_setups:
         return
+
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
         if not state.is_running or state.paused:
             return
+
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
         if open_count >= MAX_OPEN_TRADES:
             return
+
         balance = safe_get_balance()
         if balance < 1.0:
             return
+
         from modules.signal_engine import check_entry_for_setup
         from modules.position_manager import daily_drawdown_check
+
         if daily_drawdown_check():
-            state.paused = 1
+            state.paused       = 1
             state.pause_reason = "Daily drawdown limit hit"
             db.commit()
             return
-        slots  = MAX_OPEN_TRADES - open_count
-        placed = 0
-        for symbol, setup in list(_active_setups.items()):
+
+        slots         = MAX_OPEN_TRADES - open_count
+        placed        = 0
+        to_remove     = []
+
+        symbols = list(_active_setups.keys())
+
+        for symbol in symbols:
             if placed >= slots:
                 break
+
+            setup = _active_setups.get(symbol)
+            if setup is None:
+                continue
+
             try:
+                # Quick price check before expensive API calls
+                zone = setup.get("zone_check")
+                if zone:
+                    current = get_ticker_price(symbol)
+                    if current > 0:
+                        in_zone = (
+                            setup["zone_check"]["fib_low"] <= current <= setup["zone_check"]["fib_high"] or
+                            setup["zone_check"]["ob_low"]  <= current <= setup["zone_check"]["ob_high"]
+                        )
+                        if not in_zone:
+                            continue # Skip if price is outside zones
                 direct = setup.get("direct_signal")
                 if direct:
                     success = _place_trade(direct, balance, db)
                     if success:
                         placed += 1
-                        del _active_setups[symbol]
+                        to_remove.append(symbol)
                     continue
+
                 sig = check_entry_for_setup(setup)
                 if sig:
                     success = _place_trade(sig, balance, db)
                     if success:
                         placed += 1
-                        del _active_setups[symbol]
+                        to_remove.append(symbol)
+                    continue
+
+                sig = check_entry_for_setup(setup)
+                if sig:
+                    success = _place_trade(sig, balance, db)
+                    if success:
+                        placed += 1
+                        to_remove.append(symbol)
             except Exception as e:
                 print(f"[L2] error {symbol}: {e}")
+
+        for sym in to_remove:
+            _active_setups.pop(sym, None)
+
         if placed > 0:
             print(f"[L2] {placed} trades placed")
+
     except Exception as e:
         print(f"[L2] cycle error: {e}")
     finally:
