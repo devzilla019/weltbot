@@ -451,10 +451,16 @@ def _build_signal(symbol, signal, price, atr, bos, fib, ob,
 # ─── COMPUTE SIGNAL (cache/dashboard) ────────────────────────────────────────
 
 def compute_signal(symbol: str, learned_bias: float = 0.0) -> dict:
+    from modules.market_data import get_ticker_price
+    
     df = fetch_ohlcv(symbol, interval="5m", limit=100)
+    
+    # Get price directly if df failed or price is 0
     price = 0.0
     if df is not None and not df.empty:
         price = float(df["close"].iloc[-1])
+    if price == 0:
+        price = get_ticker_price(symbol)
 
     def hold(reason, extra=None):
         base = {

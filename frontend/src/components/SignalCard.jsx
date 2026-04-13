@@ -4,7 +4,7 @@ export default function SignalCard({ data, selected, onSelect }) {
   const s = data?.signal_data;
   if (!s) return null;
 
-  const price       = s.market?.price ?? 0;
+  const price = s.market?.price ?? s.price ?? s.signal_data?.price ?? 0;
   const change      = s.market?.change_pct ?? 0;
   const changeColor = change >= 0 ? "var(--buy)" : "var(--sell)";
   const bos         = s.bos;

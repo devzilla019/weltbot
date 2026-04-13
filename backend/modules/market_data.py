@@ -102,14 +102,15 @@ def get_asset_balance(asset: str) -> float:
 
 def get_ticker_price(symbol: str) -> float:
     sym = symbol.replace("/", "")
-    urls = [
-        f"{MARKET_DATA_URL}/fapi/v1/ticker/price",
-        "https://api.binance.com/api/v3/ticker/price",
-        "https://api1.binance.com/api/v3/ticker/price",
+    endpoints = [
+        f"https://api.binance.com/api/v3/ticker/price",
+        f"https://api1.binance.com/api/v3/ticker/price",
+        f"https://api2.binance.com/api/v3/ticker/price",
+        f"https://fapi.binance.com/fapi/v1/ticker/price",
     ]
-    for url in urls:
+    for url in endpoints:
         try:
-            resp = requests.get(url, params={"symbol": sym}, timeout=8)
+            resp  = requests.get(url, params={"symbol": sym}, timeout=8)
             price = float(resp.json().get("price", 0))
             if price > 0:
                 return price
@@ -121,40 +122,41 @@ def get_ticker_price(symbol: str) -> float:
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
     sym = symbol.replace("/", "")
     
-    # Try multiple data sources in order
-    urls_to_try = [
-        f"{MARKET_DATA_URL}/fapi/v1/klines",
-        "https://api.binance.com/api/v3/klines",
-        "https://api1.binance.com/api/v3/klines",
+    # All endpoints to try in order — spot endpoints work globally
+    endpoints = [
+        ("https://api.binance.com",  f"/api/v3/klines"),
+        ("https://api1.binance.com", f"/api/v3/klines"),
+        ("https://api2.binance.com", f"/api/v3/klines"),
+        ("https://fapi.binance.com", f"/fapi/v1/klines"),
     ]
     
-    for base_url in urls_to_try:
-        for attempt in range(2):
-            try:
-                resp = requests.get(
-                    base_url,
-                    params={"symbol": sym, "interval": interval, "limit": limit},
-                    timeout=15,
-                )
-                data = resp.json()
-                if not isinstance(data, list) or len(data) < 5:
-                    break
-                df = pd.DataFrame(data, columns=[
-                    "timestamp","open","high","low","close","volume",
-                    "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
-                ])
-                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                df.set_index("timestamp", inplace=True)
-                for col in ["open","high","low","close","volume"]:
-                    df[col] = pd.to_numeric(df[col])
+    for base, path in endpoints:
+        try:
+            resp = requests.get(
+                f"{base}{path}",
+                params={"symbol": sym, "interval": interval, "limit": limit},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if not isinstance(data, list) or len(data) < 5:
+                continue
+            df = pd.DataFrame(data, columns=[
+                "timestamp","open","high","low","close","volume",
+                "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
+            ])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("timestamp", inplace=True)
+            for col in ["open","high","low","close","volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["close"])
+            if len(df) >= 5:
                 return df[["open","high","low","close","volume"]]
-            except Exception as e:
-                if attempt == 0:
-                    time.sleep(1)
-                    continue
-                print(f"[market_data] fetch error {symbol} from {base_url}: {e}")
-                break
+        except Exception:
+            continue
     
+    print(f"[market_data] all endpoints failed for {symbol}")
     return pd.DataFrame()
 
 
