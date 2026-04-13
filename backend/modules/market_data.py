@@ -9,7 +9,9 @@ from config import BINANCE_API_KEY, BINANCE_SECRET_KEY, BINANCE_TESTNET
 
 # ─── URLs ─────────────────────────────────────────────────────────────────────
 # Market data — mainnet futures public API (no auth required)
-MARKET_DATA_URL = "https://fapi.binance.com"
+import os as _os
+# Use configurable market data URL — allows override for different regions
+MARKET_DATA_URL = _os.getenv("MARKET_DATA_URL", "https://fapi.binance.com")
 
 # Execution — demo trading for paper, mainnet for real
 # Note: demo-fapi may not resolve from all servers — use fallback
@@ -99,47 +101,60 @@ def get_asset_balance(asset: str) -> float:
 # ─── MARKET DATA (mainnet public) ─────────────────────────────────────────────
 
 def get_ticker_price(symbol: str) -> float:
-    try:
-        sym  = symbol.replace("/", "")
-        resp = requests.get(
-            f"{MARKET_DATA_URL}/fapi/v1/ticker/price",
-            params={"symbol": sym}, timeout=12,
-        )
-        return float(resp.json().get("price", 0))
-    except Exception as e:
-        print(f"[market_data] ticker error {symbol}: {e}")
-        return 0.0
+    sym = symbol.replace("/", "")
+    urls = [
+        f"{MARKET_DATA_URL}/fapi/v1/ticker/price",
+        "https://api.binance.com/api/v3/ticker/price",
+        "https://api1.binance.com/api/v3/ticker/price",
+    ]
+    for url in urls:
+        try:
+            resp = requests.get(url, params={"symbol": sym}, timeout=8)
+            price = float(resp.json().get("price", 0))
+            if price > 0:
+                return price
+        except Exception:
+            continue
+    return 0.0
 
 
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
-    """Fetch candles from mainnet futures — reliable, no auth, no rate limit issues."""
-    for attempt in range(3):
-        try:
-            sym  = symbol.replace("/", "")
-            resp = requests.get(
-                f"{MARKET_DATA_URL}/fapi/v1/klines",
-                params={"symbol": sym, "interval": interval, "limit": limit},
-                timeout=20,
-            )
-            data = resp.json()
-            if not isinstance(data, list) or len(data) < 10:
-                if attempt < 2:
+    sym = symbol.replace("/", "")
+    
+    # Try multiple data sources in order
+    urls_to_try = [
+        f"{MARKET_DATA_URL}/fapi/v1/klines",
+        "https://api.binance.com/api/v3/klines",
+        "https://api1.binance.com/api/v3/klines",
+    ]
+    
+    for base_url in urls_to_try:
+        for attempt in range(2):
+            try:
+                resp = requests.get(
+                    base_url,
+                    params={"symbol": sym, "interval": interval, "limit": limit},
+                    timeout=15,
+                )
+                data = resp.json()
+                if not isinstance(data, list) or len(data) < 5:
+                    break
+                df = pd.DataFrame(data, columns=[
+                    "timestamp","open","high","low","close","volume",
+                    "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
+                ])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("timestamp", inplace=True)
+                for col in ["open","high","low","close","volume"]:
+                    df[col] = pd.to_numeric(df[col])
+                return df[["open","high","low","close","volume"]]
+            except Exception as e:
+                if attempt == 0:
                     time.sleep(1)
                     continue
-                return pd.DataFrame()
-            df = pd.DataFrame(data, columns=[
-                "timestamp","open","high","low","close","volume",
-                "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
-            ])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("timestamp", inplace=True)
-            for col in ["open","high","low","close","volume"]:
-                df[col] = pd.to_numeric(df[col])
-            return df[["open","high","low","close","volume"]]
-        except Exception as e:
-            print(f"[market_data] fetch error {symbol} (attempt {attempt+1}): {e}")
-            if attempt < 2:
-                time.sleep(1)
+                print(f"[market_data] fetch error {symbol} from {base_url}: {e}")
+                break
+    
     return pd.DataFrame()
 
 
