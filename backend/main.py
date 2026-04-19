@@ -325,11 +325,10 @@ async def startup():
 def _keep_alive():
     import time
     import requests as req
-    url = "https://weltbot-backend.onrender.com"
     while True:
-        time.sleep(840)
+        time.sleep(600)
         try:
-            req.get(f"{url}/", timeout=10)
+            req.get("https://weltbot-devzilla0196688-6ipwas0e.leapcell.dev/", timeout=10)
             print("[keep-alive] ping sent")
         except Exception:
             pass
