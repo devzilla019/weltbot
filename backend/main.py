@@ -342,6 +342,10 @@ async def shutdown():
 def root():
     return {"status": "ok", "name": "WeltBot", "version": "4.0.0"}
 
+@app.get("/kaithheathcheck")
+@app.get("/kaithhealthcheck")  
+def health():
+    return {"status": "ok"}
 
 @app.get("/api/bot/status")
 def bot_status():
