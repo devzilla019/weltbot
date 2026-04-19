@@ -1,11 +1,20 @@
+import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-from config import DATABASE_URL
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./weltbot.db")
+
+# Fix relative path for cloud environments
+if DATABASE_URL.startswith("sqlite:///./"):
+    db_path = os.path.join(os.path.dirname(__file__), "weltbot.db")
+    DATABASE_URL = f"sqlite:///{db_path}"
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False, "timeout": 20}
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
 )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
