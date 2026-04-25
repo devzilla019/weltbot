@@ -22,3 +22,10 @@ MAX_TRADES_PER_ASSET_PER_DAY = 99
 MIN_CONFIDENCE               = 15.0
 REENTRY_MIN_SCORE            = 0.10
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "5"))
+# Dynamic leverage tiers based on confidence
+LEVERAGE_TIERS = {
+    95: 25,   # 95%+ confidence → 25x leverage
+    90: 20,   # 90-94% confidence → 20x leverage
+    85: 10,   # 85-89% confidence → 10x leverage
+}
+MIN_CONFIDENCE = 85.0  # No trades below 85%

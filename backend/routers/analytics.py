@@ -1,9 +1,13 @@
+import os
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
 from models import Trade
 from modules.market_data import get_balance, get_ticker_price
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from database import get_db
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -56,3 +60,32 @@ def portfolio(db: Session = Depends(get_db)):
         "unrealized_pnl": round(unrealized, 4),
         "positions":    positions,
     }
+
+@router.post("/settings/apikeys")
+def update_api_keys(data: dict):
+    """Update Binance API keys at runtime."""
+    api_key    = data.get("api_key", "").strip()
+    api_secret = data.get("api_secret", "").strip()
+    if not api_key or not api_secret:
+        return {"success": False, "error": "Both API key and secret are required"}
+    os.environ["BINANCE_API_KEY"]    = api_key
+    os.environ["BINANCE_SECRET_KEY"] = api_secret
+    # Clear balance cache so it reconnects immediately
+    try:
+        from modules.market_data import _cached_balance
+        import modules.market_data as md
+        md._cached_balance = 0.0
+        md._balance_ts     = 0.0
+    except Exception:
+        pass
+    return {"success": True, "message": "API keys updated — bot will reconnect on next scan"}
+
+@router.get("/settings/apikeys")
+def get_api_keys_status():
+    """Check if API keys are configured (never returns actual keys)."""
+    key    = os.environ.get("BINANCE_API_KEY", "")
+    secret = os.environ.get("BINANCE_SECRET_KEY", "")
+    return {
+        "configured": bool(key and secret),
+        "key_preview": f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "not set",
+    } 

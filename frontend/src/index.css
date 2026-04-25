@@ -1,113 +1,180 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:       #080a0f;
-  --surface:  #0f1218;
-  --surface2: #161b24;
-  --surface3: #1c2330;
-  --border:   rgba(255,255,255,0.06);
-  --border2:  rgba(255,255,255,0.12);
-  --text:     #e2e8f4;
-  --muted:    #4a5470;
-  --dim:      #2a3048;
-  --buy:      #00d084;
-  --sell:     #ff4d6a;
-  --hold:     #f5a623;
-  --info:     #4d9fff;
-  --purple:   #9b6dff;
-  --mono:     'JetBrains Mono', monospace;
-  --sans:     'DM Sans', sans-serif;
-  --r:        10px;
+  --bg:        #080c14;
+  --bg2:       #0d1320;
+  --bg3:       #111827;
+  --surface:   #141d2e;
+  --surface2:  #1a2540;
+  --border:    rgba(255,255,255,0.06);
+  --border2:   rgba(255,255,255,0.1);
+  --text:      #e8edf5;
+  --muted:     #6b7a99;
+  --dim:       #3d4f6e;
+  --buy:       #00e5a0;
+  --sell:      #ff4d6d;
+  --hold:      #f5a623;
+  --info:      #4d9fff;
+  --purple:    #8b6eff;
+  --gold:      #ffd700;
+  --mono:      'DM Mono', monospace;
+  --display:   'Syne', sans-serif;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: var(--sans);
+  font-family: var(--mono);
   font-size: 13px;
-  line-height: 1.6;
-  -webkit-font-smoothing: antialiased;
+  line-height: 1.5;
+  min-height: 100vh;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(77,159,255,0.08), transparent),
+    radial-gradient(ellipse 40% 30% at 80% 80%, rgba(0,229,160,0.04), transparent);
 }
 
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg2); }
+::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 2px; }
+
+/* Cards */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--r);
+  border-radius: 12px;
   padding: 16px;
 }
 
 .card2 {
   background: var(--surface2);
   border: 1px solid var(--border);
-  border-radius: var(--r);
-  padding: 14px;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.glass {
+  background: rgba(20, 29, 46, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+}
+
+/* Typography */
+.label {
+  font-size: 10px;
+  font-family: var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-transform: uppercase;
 }
 
 .mono { font-family: var(--mono); }
-.muted { color: var(--muted); }
-.label {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+.display { font-family: var(--display); }
 
+/* Tags */
 .tag {
   display: inline-flex;
   align-items: center;
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 600;
   padding: 2px 8px;
   border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--mono);
+  font-weight: 500;
   letter-spacing: 0.06em;
-  border: 1px solid;
 }
-.tag.BUY  { background: rgba(0,208,132,0.1);  color: var(--buy);  border-color: rgba(0,208,132,0.3); }
-.tag.SELL { background: rgba(255,77,106,0.1);  color: var(--sell); border-color: rgba(255,77,106,0.3); }
-.tag.HOLD { background: rgba(245,166,35,0.1);  color: var(--hold); border-color: rgba(245,166,35,0.3); }
-.tag.WIN  { background: rgba(0,208,132,0.1);   color: var(--buy);  border-color: rgba(0,208,132,0.25); }
-.tag.LOSS { background: rgba(255,77,106,0.1);  color: var(--sell); border-color: rgba(255,77,106,0.25); }
-.tag.OPEN { background: rgba(77,159,255,0.1);  color: var(--info); border-color: rgba(77,159,255,0.25); }
-.tag.testnet { background: rgba(155,109,255,0.12); color: var(--purple); border-color: rgba(155,109,255,0.3); }
+.tag.BUY    { background: rgba(0,229,160,0.12); color: var(--buy); border: 1px solid rgba(0,229,160,0.25); }
+.tag.SELL   { background: rgba(255,77,109,0.12); color: var(--sell); border: 1px solid rgba(255,77,109,0.25); }
+.tag.HOLD   { background: rgba(245,166,35,0.12); color: var(--hold); border: 1px solid rgba(245,166,35,0.25); }
+.tag.testnet{ background: rgba(139,110,255,0.12); color: var(--purple); border: 1px solid rgba(139,110,255,0.25); }
+.tag.WIN    { background: rgba(0,229,160,0.12); color: var(--buy); }
+.tag.LOSS   { background: rgba(255,77,109,0.12); color: var(--sell); }
+.tag.OPEN   { background: rgba(77,159,255,0.12); color: var(--info); }
 
+/* Buttons */
 button {
   font-family: var(--mono);
   font-size: 11px;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
   cursor: pointer;
-  border-radius: 6px;
-  padding: 7px 16px;
   transition: all 0.15s;
-  border: 1px solid var(--border2);
-  background: transparent;
-  color: var(--muted);
+  letter-spacing: 0.04em;
 }
-button:hover { border-color: var(--info); color: var(--info); }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-start  { background: var(--buy);  color: #000; font-weight: 600; }
+.btn-stop   { background: rgba(255,77,109,0.15); color: var(--sell); border: 1px solid rgba(255,77,109,0.3); }
+.btn-scan   { background: rgba(77,159,255,0.15); color: var(--info); border: 1px solid rgba(77,159,255,0.3); }
+.btn-close  { background: rgba(255,77,109,0.1); color: var(--sell); border: 1px solid rgba(255,77,109,0.25); font-size: 10px; padding: 4px 10px; }
+.btn-settings { background: rgba(255,255,255,0.05); color: var(--muted); border: 1px solid var(--border); }
+button:hover { opacity: 0.85; transform: translateY(-1px); }
+button:active { transform: translateY(0); }
+button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
 
-.btn-start {
-  background: rgba(0,208,132,0.12);
-  color: var(--buy);
-  border-color: rgba(0,208,132,0.35);
+/* Animations */
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,229,160,0.4); }
+  50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(0,229,160,0); }
+}
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-in { animation: fadeIn 0.3s ease forwards; }
+
+/* Confidence badge */
+.conf-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 10px;
   font-weight: 600;
 }
-.btn-start:hover { background: rgba(0,208,132,0.2); }
+.conf-25x { background: rgba(255,215,0,0.15); color: var(--gold); border: 1px solid rgba(255,215,0,0.3); }
+.conf-20x { background: rgba(0,229,160,0.12); color: var(--buy); border: 1px solid rgba(0,229,160,0.25); }
+.conf-10x { background: rgba(77,159,255,0.12); color: var(--info); border: 1px solid rgba(77,159,255,0.25); }
 
-.btn-stop {
-  background: rgba(255,77,106,0.1);
-  color: var(--sell);
-  border-color: rgba(255,77,106,0.3);
+/* Leverage glow effects */
+.lev-25 { text-shadow: 0 0 12px rgba(255,215,0,0.6); }
+.lev-20 { text-shadow: 0 0 12px rgba(0,229,160,0.5); }
+.lev-10 { text-shadow: 0 0 12px rgba(77,159,255,0.4); }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; }
+th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-weight: 400; }
+td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 12px; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+/* Glowing line separator */
+.glow-line {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--info), transparent);
+  opacity: 0.3;
+  margin: 16px 0;
 }
-.btn-stop:hover { background: rgba(255,77,106,0.2); }
 
-.btn-scan {
-  background: rgba(77,159,255,0.1);
-  color: var(--info);
-  border-color: rgba(77,159,255,0.3);
+/* Modal overlay */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease;
 }
-
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+.modal {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+}

@@ -26,3 +26,16 @@ def evaluate(db: Session = Depends(get_db)):
 @router.get("/accuracy")
 def accuracy(db: Session = Depends(get_db)):
     return db.query(SignalAccuracy).all()
+
+@router.post("/{trade_id}/close")
+def manual_close_trade(trade_id: int, db: Session = Depends(get_db)):
+    """Allow user to manually close an open trade."""
+    trade = db.query(Trade).filter(Trade.id == trade_id, Trade.outcome == "OPEN").first()
+    if not trade:
+        return {"success": False, "error": "Trade not found or already closed"}
+    try:
+        from modules.executor import close_position
+        result = close_position(trade.asset, trade.position_sz, trade.id)
+        return {"success": True, "message": f"Closed {trade.asset}", "pnl": result.get("pnl", 0)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}

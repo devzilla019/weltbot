@@ -7,12 +7,26 @@ def place_order(symbol, signal, position_units, stop_loss, take_profit, confiden
     db = SessionLocal()
     try:
         from modules.market_data import place_order_raw, get_ticker_price, set_leverage
+        from config import LEVERAGE_TIERS, MIN_CONFIDENCE
+
+        if confidence < MIN_CONFIDENCE:
+            print(f"[executor] {symbol} skipped — confidence {confidence}% below minimum {MIN_CONFIDENCE}%")
+            return {"success": False, "error": f"Confidence {confidence}% below minimum {MIN_CONFIDENCE}%"}
+
+        # Dynamic leverage based on confidence
+        leverage = 10
+        if confidence >= 95:
+            leverage = 25
+        elif confidence >= 90:
+            leverage = 20
+        elif confidence >= 85:
+            leverage = 10
 
         side  = "BUY" if signal == "BUY" else "SELL"
         price = get_ticker_price(symbol)
 
-        # Set leverage to 5x before placing order
-        set_leverage(symbol, leverage=5)
+        set_leverage(symbol, leverage=leverage)
+        print(f"[executor] {symbol} confidence={confidence}% → {leverage}x leverage")
 
         result = place_order_raw(symbol, side, position_units)
         if not result["success"]:
@@ -37,14 +51,18 @@ def place_order(symbol, signal, position_units, stop_loss, take_profit, confiden
         db.add(trade)
         db.commit()
         db.refresh(trade)
-        print(f"[executor] {signal} {position_units} {symbol} @ {fill_price}")
-        return {"success": True, "trade_id": trade.id, "fill_price": fill_price}
+        print(f"[executor] {signal} {position_units} {symbol} @ {fill_price} ({leverage}x)")
+        return {
+            "success":    True,
+            "trade_id":   trade.id,
+            "fill_price": fill_price,
+            "leverage":   leverage,
+        }
     except Exception as e:
         print(f"[executor] place_order error: {e}")
         return {"success": False, "error": str(e)}
     finally:
         db.close()
-
 
 def close_position(symbol, position_units, trade_id):
     db = SessionLocal()
