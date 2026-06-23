@@ -294,7 +294,7 @@ export default function Dashboard() {
               )}
             </div>
 
-            <TradeLog trades={trades} onClose={handleCloseTrade} />
+            <TradeLog trades={trades} onClose={handleCloseTrade} onRefresh={load} />
           </div>
 
           <div>

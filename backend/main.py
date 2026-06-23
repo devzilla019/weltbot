@@ -11,6 +11,7 @@ from config import (
 from datetime import datetime
 import json
 import threading
+import os
 
 Base.metadata.create_all(bind=engine)
 
@@ -325,10 +326,12 @@ async def startup():
 def _keep_alive():
     import time
     import requests as req
+    railway_url = os.getenv("weltbot-production.up.railway.app/", "")
+    url = f"https://{railway_url}" if railway_url else "http://localhost:8080"
     while True:
-        time.sleep(600)
+        time.sleep(840)
         try:
-            req.get("https://weltbot-devzilla0196688-6ipwas0e.leapcell.dev/", timeout=10)
+            req.get(f"{url}/", timeout=10)
             print("[keep-alive] ping sent")
         except Exception:
             pass
