@@ -228,34 +228,60 @@ def get_ticker_price(symbol: str) -> float:
 
 # ─── LOT SIZE ─────────────────────────────────────────────────────────────────
 
+_lot_cache: dict = {}
+
 def get_lot_size_rules(symbol: str) -> dict:
     sym = symbol.replace("/", "")
     if sym in _lot_cache:
         return _lot_cache[sym]
+
+    # Hardcoded futures precision rules for common assets
+    # AAVE, LINK, UNI etc require whole number quantities on futures
+    KNOWN_RULES = {
+        "BTCUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
+        "ETHUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
+        "BNBUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+        "SOLUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "XRPUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+        "ADAUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+        "DOGEUSDT": {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+        "AVAXUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "LINKUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "UNIUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "LTCUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+        "ATOMUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+        "NEARUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "DOTUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+        "AAVEUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+    }
+
+    if sym in KNOWN_RULES:
+        _lot_cache[sym] = KNOWN_RULES[sym]
+        return KNOWN_RULES[sym]
+
+    # Try fetching from exchange info
     try:
         resp = requests.get(
             f"{MARKET_DATA_URL}/fapi/v1/exchangeInfo",
             timeout=10,
         )
-        data = resp.json()
-        for s in data.get("symbols", []):
-            if s["symbol"] == sym:
-                rules = {"min_qty": 0.001, "step_size": 0.001,
-                         "min_notional": 5.0, "tick_size": 0.01}
-                for f in s.get("filters", []):
-                    if f["filterType"] == "LOT_SIZE":
-                        rules["min_qty"]   = float(f["minQty"])
-                        rules["step_size"] = float(f["stepSize"])
-                    if f["filterType"] == "MIN_NOTIONAL":
-                        rules["min_notional"] = float(f.get("notional", 5.0))
-                    if f["filterType"] == "PRICE_FILTER":
-                        rules["tick_size"] = float(f.get("tickSize", 0.01))
-                _lot_cache[sym] = rules
-                return rules
+        if resp.status_code == 200:
+            data = resp.json()
+            for s in data.get("symbols", []):
+                if s["symbol"] == sym:
+                    rules = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
+                    for f in s.get("filters", []):
+                        if f["filterType"] == "LOT_SIZE":
+                            rules["min_qty"]   = float(f["minQty"])
+                            rules["step_size"] = float(f["stepSize"])
+                        if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+                            rules["min_notional"] = float(f.get("notional", f.get("minNotional", 5.0)))
+                    _lot_cache[sym] = rules
+                    return rules
     except Exception as e:
-        print(f"[market_data] lot size error {symbol}: {e}")
-    default = {"min_qty": 0.001, "step_size": 0.001,
-               "min_notional": 5.0, "tick_size": 0.01}
+        print(f"[market_data] lot size fetch error {symbol}: {e}")
+
+    default = {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0}
     _lot_cache[sym] = default
     return default
 
