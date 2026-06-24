@@ -60,7 +60,6 @@ def _sign(params: dict) -> dict:
 # ─── BALANCE ──────────────────────────────────────────────────────────────────
 
 def get_balance() -> float:
-    """Get available USDT balance from futures wallet."""
     global _cached_balance, _balance_ts
     now = time.time()
     if _cached_balance > 0 and (now - _balance_ts) < 60:
@@ -74,24 +73,16 @@ def get_balance() -> float:
             )
             data = resp.json()
             if isinstance(data, list):
-                for asset in data:
-                    if asset.get("asset") == "USDT":
-                        val = float(asset.get("availableBalance", 0))
-                        if val >= 0:
-                            _cached_balance = val
-                            _balance_ts     = now
-                        return _cached_balance
-            # Fallback for different response format
-            if isinstance(data, dict) and "availableBalance" in data:
-                val = float(data["availableBalance"])
-                _cached_balance = val
-                _balance_ts     = now
-                return val
+                for b in data:
+                    if b.get("asset") == "USDT":
+                        val = float(b.get("availableBalance", 0))
+                        _cached_balance = val
+                        _balance_ts     = now
+                        return val
         except Exception as e:
             print(f"[market_data] balance error (attempt {attempt+1}): {e}")
             time.sleep(2)
     return _cached_balance
-
 
 def get_asset_balance(asset: str) -> float:
     """Not needed for futures — always returns 0 (we use USDT margin)."""
@@ -100,65 +91,140 @@ def get_asset_balance(asset: str) -> float:
 
 # ─── MARKET DATA (mainnet public) ─────────────────────────────────────────────
 
-def get_ticker_price(symbol: str) -> float:
-    sym = symbol.replace("/", "")
-    endpoints = [
-        f"https://api.binance.com/api/v3/ticker/price",
-        f"https://api1.binance.com/api/v3/ticker/price",
-        f"https://api2.binance.com/api/v3/ticker/price",
-        f"https://fapi.binance.com/fapi/v1/ticker/price",
-    ]
-    for url in endpoints:
-        try:
-            resp  = requests.get(url, params={"symbol": sym}, timeout=8)
-            price = float(resp.json().get("price", 0))
-            if price > 0:
-                return price
-        except Exception:
-            continue
-    return 0.0
-
-
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
+    """
+    Fetch OHLCV using multiple providers with fallback.
+    Priority: Binance direct → Binance mirrors → CoinGecko
+    CoinGecko works from ALL cloud servers with no IP restrictions.
+    """
     sym = symbol.replace("/", "")
-    
-    # All endpoints to try in order — spot endpoints work globally
-    endpoints = [
-        ("https://api.binance.com",  f"/api/v3/klines"),
-        ("https://api1.binance.com", f"/api/v3/klines"),
-        ("https://api2.binance.com", f"/api/v3/klines"),
-        ("https://fapi.binance.com", f"/fapi/v1/klines"),
+
+    # All Binance mirrors to try
+    binance_endpoints = [
+        f"https://api.binance.com/api/v3/klines",
+        f"https://api1.binance.com/api/v3/klines",
+        f"https://api2.binance.com/api/v3/klines",
+        f"https://api3.binance.com/api/v3/klines",
+        f"https://api4.binance.com/api/v3/klines",
+        f"https://data-api.binance.vision/api/v3/klines",
     ]
-    
-    for base, path in endpoints:
+
+    for url in binance_endpoints:
         try:
             resp = requests.get(
-                f"{base}{path}",
+                url,
                 params={"symbol": sym, "interval": interval, "limit": limit},
-                timeout=15,
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"},
             )
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            if not isinstance(data, list) or len(data) < 5:
-                continue
-            df = pd.DataFrame(data, columns=[
-                "timestamp","open","high","low","close","volume",
-                "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
-            ])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df.set_index("timestamp", inplace=True)
-            for col in ["open","high","low","close","volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            df = df.dropna(subset=["close"])
-            if len(df) >= 5:
-                return df[["open","high","low","close","volume"]]
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and len(data) >= 5:
+                    df = pd.DataFrame(data, columns=[
+                        "timestamp","open","high","low","close","volume",
+                        "close_time","quote_vol","trades","taker_base","taker_quote","ignore"
+                    ])
+                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                    df.set_index("timestamp", inplace=True)
+                    for col in ["open","high","low","close","volume"]:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                    df.dropna(subset=["close"], inplace=True)
+                    if len(df) >= 5:
+                        return df[["open","high","low","close","volume"]]
         except Exception:
             continue
-    
-    print(f"[market_data] all endpoints failed for {symbol}")
+
+    # CoinGecko fallback — works from ALL servers
+    try:
+        base_coin = sym.lower().replace("usdt", "")
+        coin_map = {
+            "btc": "bitcoin", "eth": "ethereum", "bnb": "binancecoin",
+            "sol": "solana", "xrp": "ripple", "ada": "cardano",
+            "doge": "dogecoin", "avax": "avalanche-2", "link": "chainlink",
+            "uni": "uniswap", "ltc": "litecoin", "atom": "cosmos",
+            "near": "near", "dot": "polkadot", "aave": "aave",
+        }
+        coin_id = coin_map.get(base_coin, base_coin)
+        days_map = {"1m": 1, "5m": 1, "15m": 7, "1h": 30, "4h": 90, "1d": 365}
+        days = days_map.get(interval, 7)
+
+        resp = requests.get(
+            f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
+            params={"vs_currency": "usd", "days": str(days)},
+            timeout=15,
+            headers={"User-Agent": "TradingBot/1.0"},
+        )
+        if resp.status_code == 200:
+            raw = resp.json()
+            if isinstance(raw, list) and len(raw) >= 5:
+                df = pd.DataFrame(raw, columns=["timestamp","open","high","low","close"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("timestamp", inplace=True)
+                df["volume"] = 1000000.0
+                for col in ["open","high","low","close"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                df.dropna(inplace=True)
+                if len(df) >= 5:
+                    df = df.tail(limit)
+                    print(f"[market_data] using CoinGecko for {symbol}")
+                    return df[["open","high","low","close","volume"]]
+    except Exception as e:
+        print(f"[market_data] CoinGecko error {symbol}: {e}")
+
+    print(f"[market_data] all providers failed for {symbol}")
     return pd.DataFrame()
 
+
+def get_ticker_price(symbol: str) -> float:
+    sym = symbol.replace("/", "")
+
+    # Try Binance mirrors first
+    for base in [
+        "https://api.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://data-api.binance.vision",
+    ]:
+        try:
+            resp = requests.get(
+                f"{base}/api/v3/ticker/price",
+                params={"symbol": sym}, timeout=8,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code == 200:
+                price = float(resp.json().get("price", 0))
+                if price > 0:
+                    return price
+        except Exception:
+            continue
+
+    # CoinGecko price fallback
+    try:
+        base_coin = sym.lower().replace("usdt", "")
+        coin_map = {
+            "btc": "bitcoin", "eth": "ethereum", "bnb": "binancecoin",
+            "sol": "solana", "xrp": "ripple", "ada": "cardano",
+            "doge": "dogecoin", "avax": "avalanche-2", "link": "chainlink",
+            "uni": "uniswap", "ltc": "litecoin", "atom": "cosmos",
+            "near": "near", "dot": "polkadot", "aave": "aave",
+        }
+        coin_id = coin_map.get(base_coin, base_coin)
+        resp = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coin_id, "vs_currencies": "usd"},
+            timeout=10,
+            headers={"User-Agent": "TradingBot/1.0"},
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get(coin_id, {}).get("usd", 0)
+            if price > 0:
+                print(f"[market_data] CoinGecko price {symbol}: ${price}")
+                return float(price)
+    except Exception as e:
+        print(f"[market_data] CoinGecko price error {symbol}: {e}")
+
+    return 0.0
 
 # ─── LOT SIZE ─────────────────────────────────────────────────────────────────
 
