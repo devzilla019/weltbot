@@ -105,7 +105,7 @@ def level1_bos_scan():
         if not state.is_running or state.paused:
             return
         from modules.universe      import get_universe
-        from modules.signal_engine import scan_for_bos, ema_momentum_scan, rsi_reversal_scan
+        from modules.signal_engine import scan_for_bos, check_entry_for_setup, compute_signal, ema_momentum_scan
 
         balance    = safe_get_balance()
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
@@ -153,20 +153,6 @@ def level1_bos_scan():
                         "direct_signal": mom,
                     }
                     continue
-
-                rsi = rsi_reversal_scan(symbol)
-                if rsi:
-                    new_setups[symbol] = {
-                        "symbol":    symbol,
-                        "direction": "bullish" if rsi["signal"]=="BUY" else "bearish",
-                        "timeframe": "5m",
-                        "bos":       rsi["bos"],
-                        "fib":       rsi["fib"],
-                        "ob":        rsi["ob"],
-                        "candle_age": 0,
-                        "strategy":  "RSI_REVERSAL",
-                        "direct_signal": rsi,
-                    }
             except Exception as e:
                 print(f"[L1] error {symbol}: {e}")
 
