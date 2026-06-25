@@ -24,8 +24,22 @@ REENTRY_MIN_SCORE            = 0.10
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "5"))
 # Dynamic leverage tiers based on confidence
 LEVERAGE_TIERS = {
-    95: 25,   # 95%+ confidence → 25x leverage
-    90: 20,   # 90-94% confidence → 20x leverage
-    85: 10,   # 85-89% confidence → 10x leverage
+    98:  100,   # 98%+ = extreme conviction (BTC/ETH only) → 100x
+    95:  50,    # 95-97% = very high conviction → 50x
+    90:  20,    # 90-94% = high conviction → 20x
+    85:  10,    # 85-89% = valid setup → 10x
 }
 MIN_CONFIDENCE = 85.0  # No trades below 85%
+
+# Assets allowed for extreme leverage (100x)
+HIGH_LEV_ASSETS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
+
+# News blackout
+NEWS_BLACKOUT_ENABLED = True
+TWITTER_BEARER_TOKEN  = os.getenv("TWITTER_BEARER_TOKEN", "")
+
+# Liquidation safety
+MAX_LEVERAGE              = 100
+LIQUIDATION_BUFFER_ATR    = 2.5   # cancel trade if liq price within 2.5 ATR
+DAILY_DRAWDOWN_LIMIT      = 0.05  # 5% daily stop
+MAX_OPEN_TRADES           = 3
