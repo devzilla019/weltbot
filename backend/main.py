@@ -168,7 +168,7 @@ def level2_entry_check():
     global _active_setups
     if not _active_setups:
         return
-
+    
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -248,7 +248,7 @@ def level2_entry_check():
 
         if placed > 0:
             print(f"[L2] {placed} trades placed")
-
+        
     except Exception as e:
         print(f"[L2] cycle error: {e}")
     finally:

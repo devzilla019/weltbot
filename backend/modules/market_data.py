@@ -252,7 +252,7 @@ def get_lot_size_rules(symbol: str) -> dict:
         "ATOMUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
         "NEARUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
         "DOTUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "AAVEUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+        "AAVEUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0},
     }
 
     if sym in KNOWN_RULES:
@@ -332,7 +332,12 @@ def place_order_raw(symbol: str, side: str, quantity: float) -> dict:
         # Futures position side
         pos_side = "LONG" if side.upper() == "BUY" else "SHORT"
 
-        qty_str = f"{qty:.8f}".rstrip("0").rstrip(".")
+        import math
+        if step > 0:
+            decimals = max(0, int(round(-math.log10(step))))
+        else:
+            decimals = 2
+        qty_str = f"{qty:.{decimals}f}"
         print(f"[market_data] placing {side} {qty_str} {sym} futures")
 
         params = _sign({

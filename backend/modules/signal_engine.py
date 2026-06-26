@@ -439,6 +439,8 @@ def scan_for_bos(symbol: str) -> dict | None:
             continue
 
         fib = calculate_fib_zone(bos)
+        if not fib or "zone_low" not in fib or "zone_high" not in fib:
+            continue
         ob  = identify_order_block(df, bos, fib)
         if not ob:
             continue
