@@ -1,165 +1,152 @@
+const fmtPrice = (v) => {
+  if (!v) return "—";
+  if (v >= 1000) return `$${v.toLocaleString(undefined,{maximumFractionDigits:2})}`;
+  if (v >= 1)    return `$${Number(v).toFixed(4)}`;
+  return `$${Number(v).toFixed(6)}`;
+};
+
 export default function RiskPanel({ selected }) {
   if (!selected) {
     return (
-      <div className="card" style={{ color: "var(--muted)", textAlign: "center", padding: 40, fontSize: 12 }}>
-        Click any signal card to see its setup
-      </div>
-    );
-  }
-
-  const s   = selected?.signal_data;
-  const r   = selected?.risk_plan;
-  const bos = s?.bos;
-  const fib = s?.fib;
-  const ob  = s?.ob;
-  const slt = s?.sl_tp;
-
-  const fmt = (v) => {
-    if (!v && v !== 0) return "—";
-    return v < 1
-      ? `$${Number(v).toFixed(6)}`
-      : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
-  };
-
-  if (!r || s?.signal === "HOLD") {
-    return (
-      <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between" }}>
-          <span className="label">Structure analysis</span>
-          <span className="mono" style={{ fontSize: 11 }}>{s?.symbol?.replace("/USDT", "")}</span>
-        </div>
-
-        {bos && (
-          <div className="card2">
-            <div className="label" style={{ marginBottom: 6 }}>Break of structure</div>
-            <div style={{ fontSize: 11, color: bos.direction === "bullish" ? "var(--buy)" : "var(--sell)", fontFamily: "var(--mono)", fontWeight: 600, marginBottom: 4 }}>
-              {bos.direction?.toUpperCase()} BOS
-            </div>
-            <div style={{ fontSize: 10, color: "var(--muted)" }}>
-              Broke {fmt(bos.bos_level)}
-            </div>
-          </div>
-        )}
-
-        {fib && (
-          <div className="card2">
-            <div className="label" style={{ marginBottom: 6 }}>Fibonacci zone (0.5–0.618)</div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 10, color: "var(--muted)" }}>Zone high</span>
-              <span className="mono" style={{ fontSize: 10 }}>{fmt(fib.zone_high)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-              <span style={{ fontSize: 10, color: "var(--muted)" }}>Zone low</span>
-              <span className="mono" style={{ fontSize: 10 }}>{fmt(fib.zone_low)}</span>
-            </div>
-          </div>
-        )}
-
-        {ob && (
-          <div className="card2">
-            <div className="label" style={{ marginBottom: 6 }}>Order block</div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 10, color: "var(--muted)" }}>OB high</span>
-              <span className="mono" style={{ fontSize: 10, color: "var(--buy)" }}>{fmt(ob.ob_high)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-              <span style={{ fontSize: 10, color: "var(--muted)" }}>OB low</span>
-              <span className="mono" style={{ fontSize: 10, color: "var(--sell)" }}>{fmt(ob.ob_low)}</span>
-            </div>
-          </div>
-        )}
-
-        <div style={{ color: "var(--muted)", fontSize: 11, textAlign: "center", padding: "8px 0" }}>
-          {s?.reason || "Waiting for all conditions"}
+      <div className="card risk-panel" style={{ textAlign:"center" }}>
+        <div style={{ fontSize:24, marginBottom:10, opacity:0.3 }}>📐</div>
+        <div style={{ fontSize:12, color:"var(--text3)", lineHeight:1.6 }}>
+          Click any signal card to see its full setup analysis
         </div>
       </div>
     );
   }
 
-  const stopLoss   = slt?.stop_loss   ?? r?.stop_loss;
-  const takeProfit = slt?.take_profit ?? r?.take_profit;
-  const price      = s?.market?.price ?? 0;
+  const sig   = selected.signal_data || {};
+  const risk  = selected.risk_plan   || {};
+  const mkt   = sig.market  || {};
+  const bias  = sig.bias    || {};
+  const sl_tp = sig.sl_tp   || {};
+  const bos   = sig.bos     || {};
+  const fib   = sig.fib     || {};
+  const ob    = sig.ob      || {};
+  const dir   = sig.signal;
 
-  const rows = [
-    ["Entry",          fmt(price),                     ""],
-    ["Stop-loss",      fmt(stopLoss),                  "var(--sell)"],
-    ["Take-profit",    fmt(takeProfit),                "var(--buy)"],
-    ["Position (USDT)",`$${r.position_size_usdt?.toFixed(2)}`, ""],
-    ["Position (units)",`${r.position_size_units}`,   ""],
-    ["Risk $",         `$${r.risk_usd?.toFixed(4)}`,  "var(--sell)"],
-    ["Risk %",         `${r.risk_pct?.toFixed(3)}%`,  ""],
-    ["R:R",            "1 : 2",                        "var(--info)"],
-  ];
+  const reasoning = Array.isArray(sig.reasoning) ? sig.reasoning : [];
+  const lev = sig.confidence >= 98 ? 100 : sig.confidence >= 95 ? 50 : sig.confidence >= 90 ? 20 : 10;
+  const levCls = sig.confidence >= 98 ? "lev-100" : sig.confidence >= 95 ? "lev-50" : sig.confidence >= 90 ? "lev-20" : "lev-10";
 
   return (
-    <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span className="label">Trade setup</span>
-        <div style={{ display: "flex", gap: 6 }}>
-          <span className="mono" style={{ fontSize: 11 }}>{s?.symbol?.replace("/USDT", "")}</span>
-          <span className={`tag ${s?.signal}`}>{s?.signal}</span>
+    <div className="card risk-panel">
+      {/* Header */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+        <div>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:16, fontWeight:700 }}>
+            {sig.symbol?.replace("/USDT","")} <span style={{ fontWeight:400, fontSize:12, color:"var(--text3)" }}>/USDT</span>
+          </div>
+          <div style={{ fontSize:12, fontFamily:"var(--font-mono)", marginTop:2 }}>
+            {fmtPrice(mkt.price)}
+          </div>
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4 }}>
+          <span className={`tag tag-${dir}`}>{dir}</span>
+          {sig.confidence > 0 && <span className={`lev-badge ${levCls}`}>{lev}x</span>}
         </div>
       </div>
 
-      {bos && (
-        <div style={{
-          background: bos.direction === "bullish" ? "rgba(0,208,132,0.06)" : "rgba(255,77,106,0.06)",
-          border: `1px solid ${bos.direction === "bullish" ? "rgba(0,208,132,0.2)" : "rgba(255,77,106,0.2)"}`,
-          borderRadius: 6, padding: "8px 10px", fontSize: 10,
-        }}>
-          <span style={{ color: bos.direction === "bullish" ? "var(--buy)" : "var(--sell)", fontWeight: 600 }}>
-            {bos.direction?.toUpperCase()} BOS
-          </span>
-          <span style={{ color: "var(--muted)", marginLeft: 8 }}>
-            broke {fmt(bos.bos_level)} · entry: {s.entry_type} on {s.entry_tf}
-          </span>
-        </div>
-      )}
-
-      <div>
-        {rows.map(([label, value, color]) => (
-          <div key={label} style={{
-            display: "flex", justifyContent: "space-between",
-            padding: "6px 0", borderBottom: "1px solid var(--border)",
-          }}>
-            <span style={{ color: "var(--muted)", fontSize: 12 }}>{label}</span>
-            <span className="mono" style={{ fontSize: 12, color: color || "var(--text)" }}>{value}</span>
-          </div>
-        ))}
-      </div>
-
-      {fib && (
-        <div className="card2">
-          <div className="label" style={{ marginBottom: 6 }}>Fib + OB confluence zone</div>
-          <div style={{ height: 6, background: "var(--surface3)", borderRadius: 3, position: "relative", marginBottom: 4 }}>
-            <div style={{
-              position: "absolute",
-              left: "38.2%", width: "23.6%",
-              height: "100%", background: "rgba(0,208,132,0.4)",
-              borderRadius: 3,
-            }}/>
-            <div style={{
-              position: "absolute",
-              left: `${Math.min(95, Math.max(0, (price - fib.zone_low) / (fib.zone_high - fib.zone_low) * 23.6 + 38.2))}%`,
-              width: 2, height: "100%",
-              background: "var(--info)",
-            }}/>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-            <span>0.0</span>
-            <span style={{ color: "var(--buy)" }}>0.5–0.618</span>
-            <span>1.0</span>
+      {/* HTF Bias */}
+      {bias.bias && (
+        <div className="card-sm" style={{ marginBottom:12 }}>
+          <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:6 }}>HTF DIRECTIONAL BIAS</div>
+          <div style={{ display:"flex", gap:6 }}>
+            {[["4H",bias["4h"]],["1H",bias["1h"]]].map(([tf,b]) => (
+              <div key={tf} style={{ flex:1, textAlign:"center", padding:"6px 0",
+                borderRadius:4, background:"var(--surface3)",
+                border:`1px solid ${b==="bullish"?"rgba(0,229,160,0.2)":b==="bearish"?"rgba(255,77,109,0.2)":"var(--border)"}`,
+              }}>
+                <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>{tf}</div>
+                <div style={{ fontSize:11, fontWeight:700, fontFamily:"var(--font-mono)",
+                  color:b==="bullish"?"var(--buy)":b==="bearish"?"var(--sell)":"var(--text3)",
+                }}>
+                  {(b||"neutral").toUpperCase()}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      <div className="card2" style={{ textAlign: "center" }}>
-        <div className="label" style={{ marginBottom: 6 }}>Break-even win rate</div>
-        <div className="mono" style={{ fontSize: 22, fontWeight: 600, color: "var(--info)" }}>33%</div>
-        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-          Win 1 in 3 trades to break even at 1:2 R:R
+      {/* Key levels */}
+      {(sl_tp.stop_loss || risk.stop_loss) && (
+        <div className="card-sm" style={{ marginBottom:12 }}>
+          <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:6 }}>KEY LEVELS</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+            {[
+              ["Entry",   fmtPrice(mkt.price),           "var(--text)"],
+              ["Stop Loss",fmtPrice(sl_tp.stop_loss||risk.stop_loss), "var(--sell)"],
+              ["Take Profit",fmtPrice(sl_tp.take_profit||risk.take_profit), "var(--buy)"],
+              ["Risk",    sl_tp.risk_pct ? `${sl_tp.risk_pct}%` : "—", "var(--warn)"],
+              ["R:R",     sl_tp.rr ? `1:${sl_tp.rr}` : "1:2", "var(--info)"],
+            ].map(([l,v,c]) => (
+              <div key={l} style={{ display:"flex", justifyContent:"space-between" }}>
+                <span style={{ fontSize:11, color:"var(--text3)" }}>{l}</span>
+                <span style={{ fontSize:11, fontFamily:"var(--font-mono)", color:c, fontWeight:500 }}>{v}</span>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* Confluence zones */}
+      {fib.zone_low && (
+        <div className="card-sm" style={{ marginBottom:12 }}>
+          <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:6 }}>CONFLUENCE ZONES</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            <div style={{ display:"flex", justifyContent:"space-between" }}>
+              <span style={{ fontSize:10, color:"var(--text3)" }}>Fib 0.5–0.618</span>
+              <span style={{ fontSize:10, fontFamily:"var(--font-mono)", color:"var(--purple)" }}>
+                {fmtPrice(fib.zone_low)}–{fmtPrice(fib.zone_high)}
+              </span>
+            </div>
+            {ob.ob_low && (
+              <div style={{ display:"flex", justifyContent:"space-between" }}>
+                <span style={{ fontSize:10, color:"var(--text3)" }}>Order Block</span>
+                <span style={{ fontSize:10, fontFamily:"var(--font-mono)", color:"var(--info)" }}>
+                  {fmtPrice(ob.ob_low)}–{fmtPrice(ob.ob_high)}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Reasoning */}
+      {reasoning.length > 0 && (
+        <div>
+          <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:6 }}>ANALYSIS</div>
+          <ul className="reasoning-list">
+            {reasoning.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {/* Confidence meter */}
+      {sig.confidence > 0 && (
+        <div style={{ marginTop:14 }}>
+          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+            <span style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>CONFIDENCE</span>
+            <span style={{ fontSize:11, fontFamily:"var(--font-mono)", color:"var(--text)", fontWeight:600 }}>
+              {sig.confidence?.toFixed(1)}%
+            </span>
+          </div>
+          <div style={{ height:6, background:"var(--surface2)", borderRadius:3, overflow:"hidden" }}>
+            <div style={{
+              height:"100%", borderRadius:3,
+              width:`${((sig.confidence-85)/15)*100}%`,
+              background:`linear-gradient(90deg, var(--info), ${dir==="BUY"?"var(--buy)":"var(--sell)"})`,
+            }}/>
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between", marginTop:3, fontSize:9, color:"var(--text3)" }}>
+            <span>85%</span><span>92.5%</span><span>100%</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

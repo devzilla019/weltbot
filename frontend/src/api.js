@@ -1,23 +1,33 @@
-const BASE = import.meta.env.VITE_API_URL || "http://localhost:8080";
+const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-const get  = (url) => fetch(`${BASE}${url}`).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-const post = (url, body) => fetch(`${BASE}${url}`, {
-  method: "POST",
-  headers: body ? {"Content-Type": "application/json"} : {},
-  body: body ? JSON.stringify(body) : undefined,
-}).then(r => r.json());
-
-export const api = {
-  getBotStatus:    ()           => get("/api/bot/status"),
-  startBot:        ()           => post("/api/bot/start"),
-  stopBot:         ()           => post("/api/bot/stop"),
-  scanNow:         ()           => post("/api/bot/scan-now"),
-  getAllSignals:    ()           => get("/api/signals/"),
-  getTrades:       ()           => get("/api/trades/"),
-  evaluateTrades:  ()           => post("/api/trades/evaluate"),
-  closeTrade:      (id)         => post(`/api/trades/${id}/close`),
-  getSummary:      ()           => get("/api/analytics/summary"),
-  getPortfolio:    ()           => get("/api/analytics/portfolio"),
-  getApiKeyStatus: ()           => get("/api/analytics/settings/apikeys"),
-  updateApiKeys:   (key, secret) => post("/api/analytics/settings/apikeys", {api_key: key, api_secret: secret}),
+const req = async (method, path, body) => {
+  const opts = { method, headers: { "Content-Type": "application/json" } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(`${BASE}${path}`, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 };
+
+export const makeApi = (_user) => ({
+  // Bot control
+  getBotStatus:      ()        => req("GET",    "/api/bot/status"),
+  startBot:          ()        => req("POST",   "/api/bot/start"),
+  stopBot:           ()        => req("POST",   "/api/bot/stop"),
+  scanNow:           ()        => req("POST",   "/api/bot/scan-now"),
+  // Signals
+  getAllSignals:      ()        => req("GET",    "/api/signals/"),
+  // Trades
+  getTrades:         ()        => req("GET",    "/api/trades/"),
+  clearTrades:       ()        => req("DELETE", "/api/trades/clear"),
+  closeTrade:        (id)      => req("POST",   `/api/trades/${id}/close`),
+  // Analytics
+  getSummary:        ()        => req("GET",    "/api/analytics/summary"),
+  getPortfolio:      ()        => req("GET",    "/api/analytics/portfolio"),
+  // Settings
+  getApiKeyStatus:   ()        => req("GET",    "/api/analytics/settings/apikeys"),
+  updateApiKeys:     (k, s)    => req("POST",   "/api/analytics/settings/apikeys", { api_key: k, api_secret: s }),
+  getBotSettings:    ()        => req("GET",    "/api/analytics/settings/bot"),
+  updateBotSettings: (d)       => req("POST",   "/api/analytics/settings/bot", d),
+  toggleNetwork:     (testnet) => req("POST",   "/api/analytics/settings/network", { testnet }),
+});
+

@@ -1,75 +1,68 @@
-export default function PositionCard({ position: p, onClose }) {
-  const isProfit  = p.pnl_pct >= 0;
-  const pnlColor  = isProfit ? "var(--buy)" : "var(--sell)";
-  const fmt = (v) => v < 1 ? `$${Number(v).toFixed(5)}` : `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 })}`;
+// ── PositionCard ──────────────────────────────────────────────────
+export function PositionCard({ position: p, onClose }) {
+  const isProfit = (p.unrealized ?? 0) >= 0;
+  const pnlColor = isProfit ? "var(--buy)" : "var(--sell)";
+  const lev      = p.confidence >= 98 ? 100 : p.confidence >= 95 ? 50 : p.confidence >= 90 ? 20 : 10;
+  const levCls   = p.confidence >= 98 ? "lev-100" : p.confidence >= 95 ? "lev-50" : p.confidence >= 90 ? "lev-20" : "lev-10";
 
-  const leverage = p.confidence >= 95 ? 25 : p.confidence >= 90 ? 20 : 10;
-  const levClass = p.confidence >= 95 ? "lev-25" : p.confidence >= 90 ? "lev-20" : "lev-10";
+  const fmt = (v) => !v ? "—" : v < 1 ? `$${Number(v).toFixed(5)}` : `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:3})}`;
+
+  const progress = p.entry > 0 && p.sl && p.tp
+    ? Math.min(100, Math.max(0, (p.current - p.sl) / (p.tp - p.sl) * 100))
+    : 0;
 
   return (
-    <div className="card" style={{
-      border: `1px solid ${isProfit ? "rgba(0,229,160,0.2)" : "rgba(255,77,109,0.2)"}`,
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+    <div className={`position-card ${isProfit ? "profit" : "loss"}`}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
         <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-            <span style={{ fontFamily: "var(--display)", fontSize: 15, fontWeight: 700 }}>
-              {p.asset?.replace("/USDT", "")}
+          <div style={{ display:"flex", gap:7, alignItems:"center", marginBottom:3 }}>
+            <span style={{ fontFamily:"var(--font-display)", fontSize:15, fontWeight:700 }}>
+              {p.asset?.replace("/USDT","")}
             </span>
-            <span className={`tag ${p.signal}`}>{p.signal}</span>
-            <span className={`conf-badge ${p.confidence >= 95 ? "conf-25x" : p.confidence >= 90 ? "conf-20x" : "conf-10x"}`}>
-              <span className={levClass}>{leverage}x</span>
-            </span>
+            <span className={`tag tag-${p.signal}`}>{p.signal}</span>
+            <span className={`lev-badge ${levCls}`}>{lev}x</span>
           </div>
-          <div style={{ fontSize: 10, color: "var(--muted)" }}>
-            conf {p.confidence?.toFixed(1)}%
+          <div style={{ fontSize:10, color:"var(--text3)", fontFamily:"var(--font-mono)" }}>
+            {p.confidence?.toFixed(1)}% confidence
           </div>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontFamily: "var(--display)", fontSize: 20, fontWeight: 700, color: pnlColor }}>
-            {isProfit ? "+" : ""}{p.pnl_pct?.toFixed(3)}%
+        <div style={{ textAlign:"right" }}>
+          <div style={{ fontFamily:"var(--font-display)", fontSize:20, fontWeight:700, color:pnlColor }}>
+            {isProfit?"+":""}{(p.pnl_pct||0).toFixed(3)}%
           </div>
-          <div style={{ fontSize: 11, color: pnlColor }}>
-            {p.unrealized >= 0 ? "+" : ""}${p.unrealized?.toFixed(4)}
+          <div style={{ fontSize:11, color:pnlColor, fontFamily:"var(--font-mono)" }}>
+            {(p.unrealized||0)>=0?"+":""}${(p.unrealized||0).toFixed(4)}
           </div>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 12 }}>
-        {[
-          { label: "Entry",   value: fmt(p.entry) },
-          { label: "Current", value: fmt(p.current) },
-          { label: "Stop",    value: fmt(p.sl), color: "var(--sell)" },
-          { label: "Target",  value: fmt(p.tp), color: "var(--buy)" },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="card2">
-            <div className="label" style={{ marginBottom: 2 }}>{label}</div>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: color || "var(--text)" }}>{value}</div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:10 }}>
+        {[["Entry",fmt(p.entry),""],["Current",fmt(p.current),""],
+          ["Stop",fmt(p.sl),"var(--sell)"],["Target",fmt(p.tp),"var(--buy)"]].map(([l,v,c]) => (
+          <div key={l} className="card-sm">
+            <div style={{ fontSize:9, color:"var(--text3)", fontFamily:"var(--font-mono)", marginBottom:2 }}>{l}</div>
+            <div style={{ fontSize:11, fontFamily:"var(--font-mono)", color:c||"var(--text)" }}>{v}</div>
           </div>
         ))}
       </div>
 
-      {/* Progress bar */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ height: 4, background: "var(--surface2)", borderRadius: 2, position: "relative" }}>
-          {p.entry > 0 && p.sl && p.tp && (
-            <div style={{
-              position: "absolute", left: 0,
-              width: `${Math.min(100, Math.max(0, (p.current - p.sl) / (p.tp - p.sl) * 100))}%`,
-              height: "100%", background: isProfit ? "var(--buy)" : "var(--sell)",
-              borderRadius: 2, transition: "width 0.6s ease",
-              boxShadow: isProfit ? "0 0 8px rgba(0,229,160,0.5)" : "0 0 8px rgba(255,77,109,0.5)",
-            }}/>
-          )}
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, fontSize: 9, color: "var(--dim)" }}>
-          <span>SL</span><span>TP</span>
-        </div>
+      <div className="pos-progress">
+        <div className="pos-progress-fill" style={{
+          width:`${progress}%`,
+          background:isProfit?"var(--buy)":"var(--sell)",
+          boxShadow:`0 0 6px ${isProfit?"rgba(0,229,160,0.5)":"rgba(255,77,109,0.5)"}`,
+        }}/>
+      </div>
+      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:10, fontSize:9, color:"var(--text3)" }}>
+        <span>SL</span><span>{progress.toFixed(0)}% to TP</span><span>TP</span>
       </div>
 
-      <button className="btn-close" onClick={onClose} style={{ width: "100%" }}>
-        ✕ Close Position Manually
+      <button className="btn btn-danger btn-sm" onClick={onClose} style={{ width:"100%", justifyContent:"center" }}>
+        ✕ Close Manually
       </button>
     </div>
   );
 }
+
+export default PositionCard;
+

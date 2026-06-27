@@ -409,48 +409,70 @@ def calculate_sl_tp(entry: float, ob: dict, direction: str,
 # ─── MAIN L1 SCAN ─────────────────────────────────────────────────────────────
 
 def scan_for_bos(symbol: str) -> dict | None:
-    """L1 scan — detects BOS on 15m and 5m, returns setup if valid."""
+    """
+    L1 scan with directional bias filter.
+    Only returns setups that align with HTF structure.
+    """
+    # Step 1: Get HTF directional bias
+    bias = get_directional_bias(symbol)
+    htf_bias = bias["bias"]
+
+    # Step 2: Scan 15m and 5m for BOS
     for tf in ["15m", "5m"]:
         df = fetch_ohlcv(symbol, interval=tf, limit=100)
         if df is None or df.empty or len(df) < 20:
             continue
+
         bos = detect_bos(df)
         if not bos:
             continue
 
-        # Build fib zone safely
-        try:
-           fib = calculate_fib_zone(bos)
-           if not fib or "zone_low" not in fib or "zone_high" not in fib:
-                return hold("Fib calculation failed", {"bos": bos, "sub_scores": sub})
-        except Exception:
-            return hold("Fib calculation error", {"bos": bos, "sub_scores": sub})
-       
-        # Validate fib keys exist
-        if not fib or "zone_low" not in fib or "zone_high" not in fib:
+        direction = bos["direction"]
+
+        # DIRECTIONAL BIAS FILTER — core of v5.0
+        # If HTF bias is clear, only take aligned trades
+        if htf_bias == "bullish" and direction == "bearish":
+            print(f"[signal] {symbol} {tf} BEARISH BOS blocked — 4H/1H bias is BULLISH")
+            continue
+        if htf_bias == "bearish" and direction == "bullish":
+            print(f"[signal] {symbol} {tf} BULLISH BOS blocked — 4H/1H bias is BEARISH")
             continue
 
-        ob = identify_order_block(df, bos, fib)
+        fib = calculate_fib_zone(bos)
+        ob  = identify_order_block(df, bos, fib)
         if not ob:
             continue
 
-        ma_ok = check_ma_filter(df, bos["direction"])
+        ma_ok = check_ma_filter(df, direction)
         if not ma_ok:
             continue
 
-        price = float(df["close"].iloc[-1])
-        print(f"[SMC] {symbol} {tf} {bos['direction'].upper()} BOS found — price={price}")
+        # Detect additional confluences
+        fvg            = detect_fvg(df, direction)
+        liq_sweep      = detect_liquidity_sweep(df, direction)
+        sd_zone        = identify_supply_demand(df, direction)
+        htf_aligned    = htf_bias == direction or htf_bias == "neutral"
+
+        print(f"[L1] SETUP: {symbol} {tf} {direction.upper()} "
+              f"| bias={htf_bias} fvg={bool(fvg)} liq={liq_sweep} sd={bool(sd_zone)}")
+
         return {
-            "symbol":    symbol,
-            "direction": bos["direction"],
-            "timeframe": tf,
-            "bos":       bos,
-            "fib":       fib,
-            "ob":        ob,
-            "candle_age": 0,
-            "strategy":  "SMC",
+            "symbol":       symbol,
+            "direction":    direction,
+            "timeframe":    tf,
+            "bos":          bos,
+            "fib":          fib,
+            "ob":           ob,
+            "bias":         bias,
+            "fvg":          fvg,
+            "liq_sweep":    liq_sweep,
+            "sd_zone":      sd_zone,
+            "htf_aligned":  htf_aligned,
+            "candle_age":   0,
+            "strategy":     "SMC_v5",
         }
     return None
+
 
 # ─── MAIN L2 ENTRY CHECK ──────────────────────────────────────────────────────
 
