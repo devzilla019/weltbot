@@ -134,7 +134,7 @@ def calculate_fib_zone(bos: dict) -> dict | None:
         hi  = float(bos["impulse_high"])
         lo  = float(bos["impulse_low"])
         rng = hi - lo
-        if rng <= 0 or rng / lo < 0.001:  # range must be meaningful (>0.1%)
+        if rng <= 0 or rng / lo < 0.005:  # 0.05% minimum range
             return None
         if bos["direction"] == "bullish":
             zh = hi - rng * 0.500
@@ -556,7 +556,7 @@ def ema_momentum_scan(symbol: str) -> dict | None:
         return None
 
     return {
-        "symbol":signal,"signal":signal,"confidence":conf,"raw_score":0.85 if signal=="BUY" else -0.85,
+        "symbol":symbol,"signal":signal,"confidence":conf,"raw_score":0.85 if signal=="BUY" else -0.85,
         "strategy":"EMA_CROSS",
         "bos":{"direction":direction,"bos_level":price,"impulse_high":price+atr*2,"impulse_low":price-atr*2},
         "fib":{"zone_high":price+buf,"zone_low":price-buf,"range":atr*2},
