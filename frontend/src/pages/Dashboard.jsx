@@ -10,19 +10,20 @@ import SettingsModal    from "../components/SettingsModal";
 import BuiltBy          from "../components/BuiltBy";
 
 export default function Dashboard() {
-  const { user, showToast } = useApp();
-  const api = makeApi(user);
+  const { token, showToast } = useApp();
+  const api = makeApi(token);
 
-  const [tab,          setTab]         = useState("overview");
-  const [botStatus,    setBotStatus]   = useState(null);
-  const [signals,      setSignals]     = useState([]);
-  const [trades,       setTrades]      = useState([]);
-  const [summary,      setSummary]     = useState(null);
-  const [portfolio,    setPortfolio]   = useState(null);
-  const [loading,      setLoading]     = useState(false);
-  const [actionLoad,   setActionLoad]  = useState(false);
-  const [lastUpdate,   setLastUpdate]  = useState(null);
-  const [showSettings, setShowSettings]= useState(false);
+  const [tab,           setTab]          = useState("overview");
+  const [botStatus,     setBotStatus]    = useState(null);
+  const [signals,       setSignals]      = useState([]);
+  const [trades,        setTrades]       = useState([]);
+  const [summary,       setSummary]      = useState(null);
+  const [portfolio,     setPortfolio]    = useState(null);
+  const [loading,       setLoading]      = useState(false);
+  const [actionLoad,    setActionLoad]   = useState(false);
+  const [lastUpdate,    setLastUpdate]   = useState(null);
+  const [showSettings,  setShowSettings] = useState(false);
+  const [backendDown,   setBackendDown]  = useState(false);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -34,6 +35,7 @@ export default function Dashboard() {
         api.getSummary().catch(() => null),
         api.getPortfolio().catch(() => null),
       ]);
+      setBackendDown(false);
       if (status)  setBotStatus(status);
       if (sigs)    setSignals(Array.isArray(sigs) ? sigs : []);
       if (trds)    setTrades(Array.isArray(trds) ? trds : []);
@@ -41,11 +43,10 @@ export default function Dashboard() {
       if (port)    setPortfolio(port);
       setLastUpdate(new Date().toLocaleTimeString());
     } catch {
-      if (!silent) showToast("Cannot reach backend", "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
+      setBackendDown(true);
+      if (!silent) showToast("Cannot reach Railway backend", "error");
+    } finally { setLoading(false); }
+  }, [token]);
 
   useEffect(() => {
     load();
@@ -88,7 +89,7 @@ export default function Dashboard() {
 
   const ctx = {
     botStatus, signals, trades, summary, portfolio,
-    loading, actionLoad, lastUpdate,
+    loading, actionLoad, lastUpdate, backendDown,
     handleStart, handleStop, handleScan,
     handleCloseTrade, handleClearTrades,
     refresh: load,
@@ -97,7 +98,23 @@ export default function Dashboard() {
   return (
     <div className="app-root">
       <DisclaimerBanner />
-      <Navbar tab={tab} setTab={setTab} botStatus={botStatus} onSettings={() => setShowSettings(true)} ctx={ctx} />
+      <Navbar tab={tab} setTab={setTab} botStatus={botStatus}
+        onSettings={() => setShowSettings(true)} ctx={ctx} />
+
+      {backendDown && (
+        <div style={{
+          background:"rgba(255,77,109,0.08)", border:"1px solid rgba(255,77,109,0.2)",
+          padding:"10px 24px", fontSize:11, color:"var(--sell)",
+          fontFamily:"var(--font-mono)", display:"flex", alignItems:"center", gap:8,
+        }}>
+          <span>⚠</span>
+          Backend unreachable — check Railway dashboard · Bot may still be running on server
+          <button onClick={() => load()} style={{ marginLeft:"auto", fontSize:10, padding:"3px 10px",
+            background:"rgba(255,77,109,0.1)", border:"1px solid rgba(255,77,109,0.3)",
+            color:"var(--sell)", borderRadius:4, cursor:"pointer" }}>Retry</button>
+        </div>
+      )}
+
       <div className="page-body animate-in">
         {tab === "overview" && <OverviewTab {...ctx} />}
         {tab === "signals"  && <SignalsTab  {...ctx} />}

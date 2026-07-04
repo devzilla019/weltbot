@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import engine, Base, SessionLocal
 from models import SignalCache, BotState, Trade
-from routers import signals, trades, analytics
+from routers import signals, trades, analytics, auth
 from config import (
     MAX_OPEN_TRADES,
     SCAN_INTERVAL_MIN,
@@ -20,10 +20,7 @@ app = FastAPI(title="WeltBot", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://weltbot.vercel.app",
-    ],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -31,6 +28,7 @@ app.add_middleware(
 app.include_router(signals.router)
 app.include_router(trades.router)
 app.include_router(analytics.router)
+app.include_router(auth.router)
 
 _last_scan_log  = []
 _active_setups: dict = {}
