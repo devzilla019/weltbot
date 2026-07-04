@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "╔══════════════════════════════════════════╗"
-echo "║   WeltBot v5.0 — Complete Frontend       ║"
+echo "║   WeltBot v5.0 — Complete Final Install  ║"
 echo "╚══════════════════════════════════════════╝"
 F="/c/Users/Lotim/weltbot/frontend"
 mkdir -p "$F/src/components" "$F/src/pages" "$F/src/context"
@@ -2776,15 +2776,10 @@ export default function BuiltBy() {
 
 WBEOF
 echo "  ✓ src/components/BuiltBy.jsx"
-
 echo ""
 echo "╔══════════════════════════════════════════╗"
-echo "║  ✅ All 20 files written!                 ║"
-echo "║                                          ║"
-echo "║  Next:                                   ║"
+echo "║  ✅ 20 frontend files written!            ║"
+echo "║  Now run:                                ║"
 echo "║  cd /c/Users/Lotim/weltbot/frontend      ║"
-echo "║  npm install                             ║"
-echo "║  npm run dev                             ║"
-echo "║                                          ║"
-echo "║  Then open: http://localhost:5173        ║"
+echo "║  npm install && npm run dev              ║"
 echo "╚══════════════════════════════════════════╝"
