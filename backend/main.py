@@ -38,7 +38,7 @@ _active_setups: dict = {}
 def _get_bot_state(db):
     state = db.query(BotState).first()
     if not state:
-        state = BotState(is_running=0, paused=0)
+        state = BotState(is_running=1, paused=0)  # auto-start
         db.add(state)
         db.commit()
     return state
@@ -255,6 +255,23 @@ def _keep_alive():
 
 
 # ── Scheduler ─────────────────────────────────────────────────────
+
+def _scanner_watchdog():
+    """Forces L1 scan every 16 min if scheduler missed it."""
+    import time as _time
+    while True:
+        _time.sleep(960)
+        db = SessionLocal()
+        try:
+            state = _get_bot_state(db)
+            if state.is_running and not state.paused:
+                print("[watchdog] forcing L1 scan")
+                threading.Thread(target=level1_bos_scan, daemon=True).start()
+        except Exception as e:
+            print(f"[watchdog] error: {e}")
+        finally:
+            db.close()
+
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_positions,      "interval", minutes=2)
 scheduler.add_job(level2_entry_check,   "interval", seconds=60,
@@ -274,6 +291,7 @@ async def startup():
     threading.Thread(target=refresh_signal_cache, daemon=True).start()
     threading.Thread(target=level1_bos_scan,      daemon=True).start()
     threading.Thread(target=_keep_alive,           daemon=True).start()
+    threading.Thread(target=_scanner_watchdog,     daemon=True).start()
 
 
 @app.on_event("shutdown")

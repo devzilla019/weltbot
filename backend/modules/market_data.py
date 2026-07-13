@@ -76,9 +76,12 @@ def get_balance() -> float:
                 for b in data:
                     if b.get("asset") == "USDT":
                         val = float(b.get("availableBalance", 0))
-                        _cached_balance = val
-                        _balance_ts     = now
-                        return val
+                        if val == 0:
+                            val = float(b.get("walletBalance", 0))
+                        if val > 0:
+                            _cached_balance = val
+                            _balance_ts     = now
+                            return val
         except Exception as e:
             print(f"[market_data] balance error (attempt {attempt+1}): {e}")
             time.sleep(2)

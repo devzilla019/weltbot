@@ -362,10 +362,7 @@ def scan_for_bos(symbol: str) -> dict | None:
         if htf_bias == "bearish" and direction == "bullish":
             print(f"[signal] {symbol} {tf} BULLISH blocked — HTF BEARISH")
             continue
-        # If neutral bias AND low confidence expected, skip
-        if htf_bias == "neutral" and bias["score"] == 0:
-            print(f"[signal] {symbol} {tf} skipped — bias completely neutral")
-            continue
+        # Neutral bias allowed — only block OPPOSITE direction
 
         fib = calculate_fib_zone(bos)
         if not fib:
@@ -513,9 +510,7 @@ def check_entry_for_setup(setup: dict) -> dict | None:
 
 def ema_momentum_scan(symbol: str) -> dict | None:
     bias = get_directional_bias(symbol)
-    # Only fire if bias is clear
-    if bias["bias"] == "neutral":
-        return None
+    # Allow neutral bias — only block opposite direction below
 
     df = fetch_ohlcv(symbol, interval="5m", limit=60)
     if df is None or df.empty or len(df) < 30:
