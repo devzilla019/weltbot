@@ -1,7 +1,7 @@
 import{useApp}from"../context/AppContext";
 export default function Navbar({tab,setTab,botStatus,onSettings,ctx}){
   const{user,logout}=useApp();
-  const{handleStart,handleStop,handleScan,actionLoad,lastUpdate}=ctx;
+  const{handleStart,handleStop,handleScan,handleCloseAll,actionLoad,lastUpdate}=ctx;
   const isLive=botStatus?.running&&!botStatus?.paused;
   const isPaused=botStatus?.paused;
   const balance=botStatus?.balance_usdt??0;
@@ -29,6 +29,7 @@ export default function Navbar({tab,setTab,botStatus,onSettings,ctx}){
         </div>
         {!isLive?<button className="btn btn-success btn-sm" onClick={handleStart} disabled={actionLoad}>{actionLoad?"…":"▶ Start"}</button>:<button className="btn btn-danger btn-sm" onClick={handleStop} disabled={actionLoad}>{actionLoad?"…":"■ Stop"}</button>}
         <button className="btn btn-scan btn-sm" onClick={handleScan} disabled={actionLoad}>⟳ Scan</button>
+        <button onClick={handleCloseAll} title="Close all exchange positions" style={{padding:"6px 10px",borderRadius:6,fontSize:10,background:"rgba(255,77,109,0.12)",color:"var(--sell)",border:"1px solid rgba(255,77,109,0.3)",cursor:"pointer",fontFamily:"var(--font-mono)",fontWeight:600}}>✕ Close All</button>
         <button className="icon-btn" onClick={onSettings} title="Settings">⚙</button>
         <div className="user-chip"><div className="user-avatar">{initials}</div><span className="user-name">{user?.name?.split(" ")[0]||"Trader"}</span></div>
         <button className="icon-btn" onClick={logout} title="Sign out" style={{fontSize:13}}>⎋</button>

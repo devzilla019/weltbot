@@ -42,7 +42,15 @@ export default function Dashboard(){
   const handleScan=async()=>{setActionLoad(true);showToast("Scanning…","info");try{await api.scanNow();setTimeout(()=>load(true),6000);}catch{showToast("Failed","error");}finally{setActionLoad(false);}};
   const handleCloseTrade=async(id)=>{try{const r=await api.closeTrade(id);if(r.success){showToast(`Closed · P&L $${(r.pnl||0).toFixed(4)}`,"success");load(true);}else showToast(r.error||"Failed","error");}catch{showToast("Failed","error");}};
   const handleClearTrades=async()=>{try{const r=await api.clearTrades();if(r.success){showToast(`Cleared ${r.deleted} trades`,"success");load(true);}}catch{showToast("Failed","error");}};
-  const ctx={botStatus,signals,trades,summary,portfolio,loading,actionLoad,lastUpdate,backendDown,handleStart,handleStop,handleScan,handleCloseTrade,handleClearTrades,refresh:load};
+  const handleCloseAll=async()=>{
+    try{
+      const BASE=import.meta.env.VITE_API_URL||"http://localhost:8000";
+      const r=await fetch(BASE+"/api/bot/close-all",{method:"POST"}).then(x=>x.json());
+      showToast(`Closed ${r.exchange_closed||0} exchange positions`,"success");
+      load(true);
+    }catch{showToast("Close all failed","error");}
+  };
+  const ctx={botStatus,signals,trades,summary,portfolio,loading,actionLoad,lastUpdate,backendDown,handleStart,handleStop,handleScan,handleCloseTrade,handleClearTrades,handleCloseAll,refresh:load};
   return(
     <div className="app-root">
       <DisclaimerBanner/>

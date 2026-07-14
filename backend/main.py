@@ -354,3 +354,40 @@ def scan_now():
     threading.Thread(target=level1_bos_scan,    daemon=True).start()
     threading.Thread(target=level2_entry_check, daemon=True).start()
     return {"message": "Manual scan triggered"}
+
+
+@app.post("/api/bot/close-all")
+def close_all_positions():
+    """Emergency: close ALL open positions on exchange and in DB."""
+    from modules.position_manager import close_all_exchange_positions
+    from models import Trade
+    db = SessionLocal()
+    try:
+        results = close_all_exchange_positions()
+        # Mark all open trades as closed in DB
+        open_trades = db.query(Trade).filter(Trade.outcome == "OPEN").all()
+        from modules.market_data import get_ticker_price
+        closed = 0
+        for t in open_trades:
+            price = get_ticker_price(t.asset)
+            if price > 0:
+                pnl = (price - t.entry_price) * (t.position_sz or 0) if t.signal == "BUY"                       else (t.entry_price - price) * (t.position_sz or 0)
+                t.outcome   = "WIN" if pnl >= 0 else "LOSS"
+                t.pnl       = round(pnl, 4)
+                t.closed_at = datetime.utcnow()
+                closed += 1
+        db.commit()
+        return {"success": True, "exchange_closed": len(results), "db_closed": closed, "results": results}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
+@app.get("/api/bot/exchange-positions")
+def get_exchange_positions_api():
+    """Get all open positions directly from Binance exchange."""
+    from modules.position_manager import get_exchange_positions, sync_exchange_positions
+    sync_exchange_positions()
+    positions = get_exchange_positions()
+    return {"count": len(positions), "positions": positions}
