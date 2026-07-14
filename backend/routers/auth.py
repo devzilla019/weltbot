@@ -357,3 +357,49 @@ def _apply_user_keys(user: User):
                 md.EXEC_URL = os.getenv("FUTURES_EXEC_URL", "https://testnet.binancefuture.com")
     except Exception as e:
         print(f"[auth] apply keys error: {e}")
+
+
+# ── Emergency endpoints ────────────────────────────────────────────────────────
+
+@router.post("/reset-password")
+async def emergency_reset(request: Request):
+    """Emergency password reset — requires ADMIN_SECRET env var."""
+    admin_secret = os.getenv("ADMIN_SECRET", "")
+    if not admin_secret:
+        raise HTTPException(403, "ADMIN_SECRET not configured on server")
+    body     = await request.json()
+    provided = body.get("admin_secret", "")
+    if provided != admin_secret:
+        raise HTTPException(403, "Invalid admin secret")
+    email    = body.get("email", "").strip().lower()
+    new_pass = body.get("new_password", "").strip()
+    if not email or not new_pass or len(new_pass) < 6:
+        raise HTTPException(400, "Email and new password (min 6 chars) required")
+    db = next(get_db())
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(404, f"No user found with email: {email}")
+        user.password_hash = _hash_pw(new_pass)
+        db.commit()
+        return {"success": True, "message": f"Password reset for {email}"}
+    finally:
+        db.close()
+
+
+@router.get("/list-users")
+def list_users(admin_secret: str = ""):
+    """List all registered users — admin only."""
+    expected = os.getenv("ADMIN_SECRET", "")
+    if not expected or admin_secret != expected:
+        raise HTTPException(403, "Unauthorized")
+    db = next(get_db())
+    try:
+        users = db.query(User).all()
+        return {"users": [{"id":u.id,"name":u.name,"email":u.email,
+                           "has_keys":bool(u.binance_key),
+                           "created_at":u.created_at.isoformat() if u.created_at else None,
+                           "last_login":u.last_login.isoformat() if u.last_login else None}
+                          for u in users]}
+    finally:
+        db.close()
