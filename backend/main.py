@@ -391,3 +391,27 @@ def get_exchange_positions_api():
     sync_exchange_positions()
     positions = get_exchange_positions()
     return {"count": len(positions), "positions": positions}
+
+
+@app.post("/api/bot/cleanup-duplicates")
+def cleanup_duplicate_trades():
+    """Remove duplicate OPEN trades for same asset — keep only the latest one."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import func
+        open_trades = db.query(Trade).filter(Trade.outcome=="OPEN").order_by(Trade.id.desc()).all()
+        seen = set()
+        to_delete = []
+        for t in open_trades:
+            if t.asset in seen:
+                to_delete.append(t.id)
+            else:
+                seen.add(t.asset)
+        if to_delete:
+            db.query(Trade).filter(Trade.id.in_(to_delete)).delete(synchronize_session=False)
+            db.commit()
+        return {"success": True, "deleted_duplicates": len(to_delete), "kept": len(seen)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
