@@ -61,3 +61,34 @@ class ActiveSetup(Base):
     candles_age = Column(Integer, default=0)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
     updated_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+class ForexTrade(Base):
+    __tablename__ = "forex_trades"
+    id                  = Column(Integer, primary_key=True, index=True)
+    symbol              = Column(String, index=True)
+    signal              = Column(String)
+    confidence          = Column(Float)
+    entry_price         = Column(Float)
+    stop_loss           = Column(Float)
+    take_profit         = Column(Float)
+    lots                = Column(Float)
+    kronos_bias         = Column(String)
+    crt_setup           = Column(String)
+    pdh                 = Column(Float)
+    pdl                 = Column(Float)
+    outcome             = Column(String, default="OPEN")
+    pnl                 = Column(Float, nullable=True)
+    metaapi_position_id = Column(String, nullable=True)
+    created_at          = Column(DateTime(timezone=True), server_default=func.now())
+    closed_at           = Column(DateTime(timezone=True), nullable=True)
+
+class CRTLevel(Base):
+    __tablename__ = "crt_levels"
+    id              = Column(Integer, primary_key=True)
+    symbol          = Column(String, index=True)
+    date            = Column(String, index=True)
+    pdh             = Column(Float)
+    pdl             = Column(Float)
+    sweep_type      = Column(String, default="NONE")
+    sweep_confirmed = Column(Integer, default=0)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())

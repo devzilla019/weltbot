@@ -31,3 +31,14 @@ export const makeApi=(token)=>({
   updateBotSettings:(d)=>req("POST","/api/analytics/settings/bot",d,token),
   getBotSettings:()=>req("GET","/api/analytics/settings/bot",null,token),
 });
+
+// Forex API — no auth (open dashboard)
+export const forexApi = {
+  getStatus:    ()       => req("GET",  "/api/forex/status"),
+  getSignals:   ()       => req("GET",  "/api/forex/signals"),
+  getPositions: ()       => req("GET",  "/api/forex/positions"),
+  getTrades:    (limit)  => req("GET",  `/api/forex/trades?limit=${limit || 50}`),
+  getPair:      (symbol) => req("GET",  `/api/forex/pair/${symbol}`),
+  updateBias:   (symbol) => req("POST", `/api/forex/update-bias/${symbol}`),
+  updateCRT:    (symbol) => req("POST", `/api/forex/update-crt/${symbol}`),
+};

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import engine, Base, SessionLocal
 from models import SignalCache, BotState, Trade
-from routers import signals, trades, analytics, auth
+from routers import signals, trades, analytics, auth, forex
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
 from datetime import datetime
 import json, os, threading
@@ -30,9 +30,11 @@ app.include_router(signals.router)
 app.include_router(trades.router)
 app.include_router(analytics.router)
 app.include_router(auth.router)
+app.include_router(forex.router)
 
 _last_scan_log  = []
 _active_setups: dict = {}
+_forex_active_setups: dict = {}
 
 
 def _get_bot_state(db):
@@ -241,6 +243,179 @@ def refresh_signal_cache():
         db.close()
 
 
+def run_kronos_bias_update():
+    """Update Kronos AI bias for all forex pairs"""
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+    
+    try:
+        from modules.market_data_forex import get_candles
+        from modules.kronos_engine import predict_bias
+        from config import FOREX_PAIRS
+        
+        print(f"[kronos] updating bias for {len(FOREX_PAIRS)} pairs")
+        
+        for symbol in FOREX_PAIRS:
+            try:
+                df = get_candles(symbol, timeframe='1h', limit=400)
+                if df is not None and len(df) >= 400:
+                    predict_bias(symbol, df)
+            except Exception as e:
+                print(f"[kronos] error {symbol}: {e}")
+        
+        print("[kronos] bias update complete")
+    except Exception as e:
+        print(f"[kronos] update cycle error: {e}")
+
+
+def run_crt_scan():
+    """Scan for CRT setups (sweep + confirmation)"""
+    global _forex_active_setups
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+    
+    db = SessionLocal()
+    try:
+        state = _get_bot_state(db)
+        if not state.is_running or state.paused:
+            return
+        
+        from modules.market_data_forex import get_candles
+        from modules.crt_detector import get_cached_levels, detect_sweep, validate_with_kronos, store_crt_level
+        from modules.kronos_engine import get_cached_bias
+        from config import FOREX_PAIRS
+        
+        print("[crt] scanning for setups")
+        
+        for symbol in FOREX_PAIRS:
+            try:
+                if symbol in _forex_active_setups:
+                    continue
+                
+                levels = get_cached_levels(symbol)
+                if not levels:
+                    continue
+                
+                h1 = get_candles(symbol, timeframe='1h', limit=10)
+                if h1 is None or len(h1) < 3:
+                    continue
+                
+                sweep = detect_sweep(symbol, h1, levels['pdh'], levels['pdl'])
+                if not sweep:
+                    continue
+                
+                bias = get_cached_bias(symbol)
+                if not validate_with_kronos(sweep, bias):
+                    continue
+                
+                _forex_active_setups[symbol] = sweep
+                store_crt_level(sweep)
+                print(f"[crt] {symbol} setup confirmed — {sweep['direction']} target={sweep['target']:.5f}")
+                
+            except Exception as e:
+                print(f"[crt] error {symbol}: {e}")
+        
+        print(f"[crt] scan complete — {len(_forex_active_setups)} active setups")
+    except Exception as e:
+        print(f"[crt] scan cycle error: {e}")
+    finally:
+        db.close()
+
+
+def run_forex_entry_check():
+    """Check for SMC entry on active CRT setups"""
+    global _forex_active_setups
+    if not _forex_active_setups:
+        return
+    
+    db = SessionLocal()
+    try:
+        state = _get_bot_state(db)
+        if not state.is_running or state.paused:
+            return
+        
+        from modules.market_data_forex import get_candles, get_current_price
+        from modules.forex_signal_engine import check_entry_condition
+        from modules.forex_executor import place_forex_order
+        from modules.forex_position_manager import can_open_forex_trade
+        from modules.kronos_engine import get_cached_bias
+        
+        for symbol in list(_forex_active_setups.keys()):
+            try:
+                setup = _forex_active_setups[symbol]
+                
+                allowed, reason = can_open_forex_trade(symbol)
+                if not allowed:
+                    print(f"[forex-entry] {symbol} blocked: {reason}")
+                    continue
+                
+                price = get_current_price(symbol)
+                if price is None:
+                    continue
+                
+                df_5m = get_candles(symbol, timeframe='5m', limit=50)
+                if df_5m is None or len(df_5m) < 20:
+                    continue
+                
+                signal = check_entry_condition(setup, price, df_5m)
+                
+                if signal:
+                    bias = get_cached_bias(symbol)
+                    if bias:
+                        signal['confidence'] += bias.get('confidence_boost', 0)
+                        signal['confidence'] = min(signal['confidence'], 99)
+                    
+                    from config import FOREX_MIN_CONF
+                    if signal['confidence'] >= FOREX_MIN_CONF:
+                        result = place_forex_order(signal, bias or {})
+                        if result['success']:
+                            print(f"[forex-entry] TRADE PLACED — {signal['signal']} {symbol} @ {signal['entry_price']:.5f}")
+                            _forex_active_setups.pop(symbol, None)
+                    else:
+                        print(f"[forex-entry] {symbol} confidence too low: {signal['confidence']:.1f}%")
+                        _forex_active_setups.pop(symbol, None)
+                
+            except Exception as e:
+                print(f"[forex-entry] error {symbol}: {e}")
+                _forex_active_setups.pop(symbol, None)
+        
+    except Exception as e:
+        print(f"[forex-entry] cycle error: {e}")
+    finally:
+        db.close()
+
+
+def run_forex_position_monitor():
+    """Monitor forex positions via MetaApi"""
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+    
+    try:
+        from modules.forex_position_manager import check_forex_positions
+        check_forex_positions()
+    except Exception as e:
+        print(f"[forex-positions] error: {e}")
+
+
+def run_daily_pdh_pdl_reset():
+    """Reset PDH/PDL at 00:01 UTC daily"""
+    global _forex_active_setups
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+    
+    try:
+        from modules.crt_detector import update_pdh_pdl_all_pairs
+        print("[crt] daily PDH/PDL reset (00:01 UTC)")
+        _forex_active_setups = {}
+        update_pdh_pdl_all_pairs()
+    except Exception as e:
+        print(f"[crt] daily reset error: {e}")
+
+
 def _keep_alive():
     import time, requests as req
     domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
@@ -273,11 +448,20 @@ def _scanner_watchdog():
             db.close()
 
 scheduler = BackgroundScheduler()
+# Crypto jobs
 scheduler.add_job(check_positions,      "interval", minutes=2)
 scheduler.add_job(level2_entry_check,   "interval", seconds=60,
                   max_instances=3, coalesce=True, misfire_grace_time=30)
 scheduler.add_job(level1_bos_scan,      "interval", minutes=SCAN_INTERVAL_MIN)
 scheduler.add_job(refresh_signal_cache, "interval", minutes=10)
+
+# Forex jobs
+scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15)
+scheduler.add_job(run_crt_scan,               "interval", minutes=15)
+scheduler.add_job(run_forex_entry_check,      "interval", seconds=60)
+scheduler.add_job(run_forex_position_monitor, "interval", minutes=2)
+scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1)  # 00:01 UTC
+
 scheduler.start()
 
 
@@ -288,6 +472,23 @@ async def startup():
     state = _get_bot_state(db)
     state.is_running = 1; state.paused = 0
     db.commit(); db.close()
+    
+    from config import FOREX_ENABLED, KRONOS_ENABLED
+    
+    if FOREX_ENABLED:
+        print("[weltbot] forex enabled — initializing...")
+        
+        if KRONOS_ENABLED:
+            print("[weltbot] loading Kronos model...")
+            from modules.kronos_engine import _load_kronos_model
+            threading.Thread(target=_load_kronos_model, daemon=True).start()
+        
+        from modules.crt_detector import update_pdh_pdl_all_pairs
+        threading.Thread(target=update_pdh_pdl_all_pairs, daemon=True).start()
+        
+        threading.Thread(target=run_kronos_bias_update, daemon=True).start()
+        threading.Thread(target=run_crt_scan, daemon=True).start()
+    
     threading.Thread(target=refresh_signal_cache, daemon=True).start()
     threading.Thread(target=level1_bos_scan,      daemon=True).start()
     threading.Thread(target=_keep_alive,           daemon=True).start()
@@ -319,6 +520,17 @@ def bot_status():
     reason = state.pause_reason
     db.close()
     balance = safe_get_balance()
+    
+    from config import FOREX_ENABLED
+    forex_info = {}
+    if FOREX_ENABLED:
+        from modules.kronos_engine import is_kronos_available
+        forex_info = {
+            "forex_enabled": True,
+            "kronos_available": is_kronos_available(),
+            "forex_active_setups": list(_forex_active_setups.keys())
+        }
+    
     return {
         "running":       is_run,
         "paused":        paused,
@@ -327,6 +539,7 @@ def bot_status():
         "testnet":       BINANCE_TESTNET,
         "last_scan":     _last_scan_log,
         "active_setups": list(_active_setups.keys()),
+        **forex_info
     }
 
 

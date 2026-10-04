@@ -6,6 +6,7 @@ import DisclaimerBanner from"../components/DisclaimerBanner";
 import OverviewTab from"../components/OverviewTab";
 import SignalsTab from"../components/SignalsTab";
 import TradesTab from"../components/TradesTab";
+import ForexTab from"../components/ForexTab";
 import SettingsModal from"../components/SettingsModal";
 import BuiltBy from"../components/BuiltBy";
 export default function Dashboard(){
@@ -60,6 +61,7 @@ export default function Dashboard(){
         {tab==="overview"&&<OverviewTab {...ctx}/>}
         {tab==="signals"&&<SignalsTab {...ctx}/>}
         {tab==="trades"&&<TradesTab {...ctx}/>}
+        {tab==="forex"&&<ForexTab/>}
       </div>
       <BuiltBy/>
       {showSettings&&<SettingsModal onClose={()=>setShowSettings(false)} onRefresh={()=>load(true)}/>}

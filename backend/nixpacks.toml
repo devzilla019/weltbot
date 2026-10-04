@@ -1,0 +1,22 @@
+# Railway / Nixpacks build configuration for WeltBot backend
+# Clones the Kronos repo alongside the project so `from model import ...` works.
+
+[phases.setup]
+nixPkgs = ["python311", "gcc", "git"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt",
+  "python -m textblob.download_corpora",
+]
+
+[phases.build]
+cmds = [
+  # Clone Kronos model repo into the backend dir (and repo root as fallback)
+  "test -d Kronos || git clone --depth 1 https://github.com/shiyu-coder/Kronos.git Kronos || true",
+  "echo '[build] Kronos repo ready'",
+]
+
+[start]
+cmd = "python -m uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"

@@ -49,6 +49,29 @@ ALLOWED_ORIGINS = os.getenv(
 NEWS_BLACKOUT_ENABLED = os.getenv("NEWS_BLACKOUT_ENABLED", "true").lower() == "true"
 TWITTER_BEARER_TOKEN  = os.getenv("TWITTER_BEARER_TOKEN",  "")
 
+# ── MetaApi (Forex/Metals) ────────────────────────────────────────────────────
+METAAPI_TOKEN      = os.getenv("METAAPI_TOKEN",      "")
+METAAPI_ACCOUNT_ID = os.getenv("METAAPI_ACCOUNT_ID", "")
+FOREX_ENABLED      = os.getenv("FOREX_ENABLED", "false").lower() == "true"
+FOREX_PAIRS        = os.getenv("FOREX_PAIRS", "XAUUSD,EURUSD,GBPUSD,EURCHF,EURJPY,GBPJPY,AUDJPY,NZDCAD").split(",")
+
+# ── Kronos AI ──────────────────────────────────────────────────────────────────
+KRONOS_ENABLED     = os.getenv("KRONOS_ENABLED", "false").lower() == "true"
+KRONOS_MODEL_PATH  = os.getenv("KRONOS_MODEL_PATH", "NeoQuasar/Kronos-mini")
+KRONOS_TOKENIZER   = os.getenv("KRONOS_TOKENIZER",  "NeoQuasar/Kronos-Tokenizer-2k")
+
+# ── Forex Risk (separate from crypto) ──────────────────────────────────────────
+FOREX_MAX_RISK_PCT = float(os.getenv("FOREX_MAX_RISK_PCT", "0.02"))  # 2% per trade
+FOREX_MAX_TRADES   = int(os.getenv("FOREX_MAX_TRADES",   "3"))      # 3 max forex positions
+FOREX_MIN_CONF     = float(os.getenv("FOREX_MIN_CONF",   "85.0"))   # 85% minimum
+
+# ── Forex Leverage Tiers ───────────────────────────────────────────────────────
+FOREX_LEVERAGE_TIERS = {
+    95: 100,  # 95%+ = 100:1
+    90: 50,   # 90%+ = 50:1
+    85: 20,   # 85%+ = 20:1
+}
+
 # ── Safety ─────────────────────────────────────────────────────────────────────
 LIQUIDATION_BUFFER_ATR = float(os.getenv("LIQUIDATION_BUFFER_ATR", "2.5"))
 

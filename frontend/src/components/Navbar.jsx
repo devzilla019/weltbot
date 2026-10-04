@@ -17,7 +17,7 @@ export default function Navbar({tab,setTab,botStatus,onSettings,ctx}){
         {botStatus?.testnet&&<span style={{fontSize:9,color:"var(--purple)",padding:"2px 8px",borderRadius:4,background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.25)",fontFamily:"var(--font-mono)",letterSpacing:"0.1em"}}>TESTNET</span>}
       </div>
       <div className="navbar-center">
-        {[["overview","📊 Overview"],["signals","📡 Signals"],["trades","📋 Trades"]].map(([t,l])=>(
+        {[["overview","📊 Overview"],["signals","📡 Signals"],["trades","📋 Trades"],["forex","💱 Forex"]].map(([t,l])=>(
           <button key={t} className={`nav-tab ${tab===t?"active":""}`} onClick={()=>setTab(t)}>{l}</button>
         ))}
       </div>
