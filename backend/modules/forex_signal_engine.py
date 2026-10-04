@@ -184,17 +184,16 @@ def check_entry_condition(crt_setup: Dict, current_price: float, df_5m: pd.DataF
             logger.debug(f"[smc] {symbol} price not in OB zone")
             return None
         
-        fvg_nearby = False
-        if fvg:
-            fvg_distance = min(abs(current_price - fvg['fvg_high']), abs(current_price - fvg['fvg_low']))
-            pip_value = 0.0001 if 'JPY' not in symbol else 0.01
-            fvg_nearby = fvg_distance < (10 * pip_value)
-        
         if not fvg:
             logger.debug(f"[smc] {symbol} no FVG detected")
             return None
         
         atr = calculate_atr(df_5m)
+        
+        # Asset-agnostic proximity: FVG must be within half an ATR of price.
+        # Works for forex (pips), metals and crypto (dollars) alike.
+        fvg_distance = min(abs(current_price - fvg['fvg_high']), abs(current_price - fvg['fvg_low']))
+        fvg_nearby = fvg_distance < (0.5 * atr) if atr > 0 else True
         
         if direction == 'BUY':
             entry = current_price

@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import engine, Base, SessionLocal
 from models import SignalCache, BotState, Trade
-from routers import signals, trades, analytics, auth, forex
+from routers import signals, trades, analytics, forex
+# AUTH DISABLED — re-enable later by importing + including auth.router below
+# from routers import auth
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
 from datetime import datetime
 import json, os, threading
@@ -29,7 +31,7 @@ app.add_middleware(
 app.include_router(signals.router)
 app.include_router(trades.router)
 app.include_router(analytics.router)
-app.include_router(auth.router)
+# AUTH DISABLED — app.include_router(auth.router)
 app.include_router(forex.router)
 
 _last_scan_log  = []
@@ -416,6 +418,118 @@ def run_daily_pdh_pdl_reset():
         print(f"[crt] daily reset error: {e}")
 
 
+# ── CRYPTO: same 3-layer strategy (Kronos + CRT + SMC) ────────────────────────
+
+def run_crypto_kronos_bias():
+    """Update Kronos AI bias for all crypto symbols (H1)."""
+    from config import KRONOS_ENABLED
+    if not KRONOS_ENABLED:
+        return
+    try:
+        from modules.universe import get_universe
+        from modules.crypto_strategy import update_all_crypto_bias
+        symbols = get_universe()
+        n = update_all_crypto_bias(symbols)
+        print(f"[crypto-kronos] bias updated for {n}/{len(symbols)} symbols")
+    except Exception as e:
+        print(f"[crypto-kronos] cycle error: {e}")
+
+
+def run_crypto_crt_scan():
+    """Detect CRT setups on crypto symbols and validate with Kronos."""
+    db = SessionLocal()
+    try:
+        state = _get_bot_state(db)
+        if not state.is_running or state.paused:
+            return
+        from modules.universe import get_universe
+        from modules.crypto_strategy import update_crypto_levels, scan_crypto_crt, get_crypto_setups
+        symbols = get_universe()
+        for sym in symbols:
+            try:
+                update_crypto_levels(sym)
+                scan_crypto_crt(sym)
+            except Exception as e:
+                print(f"[crypto-crt] {sym} error: {e}")
+        print(f"[crypto-crt] scan complete — {len(get_crypto_setups())} active setups")
+    except Exception as e:
+        print(f"[crypto-crt] cycle error: {e}")
+    finally:
+        db.close()
+
+
+def run_crypto_entry_check():
+    """Check SMC entries on active crypto CRT setups and place orders."""
+    db = SessionLocal()
+    try:
+        state = _get_bot_state(db)
+        if not state.is_running or state.paused:
+            return
+
+        from modules.crypto_strategy import get_crypto_setups, check_crypto_entry, clear_crypto_setup
+        from modules.position_manager import can_reenter
+        from modules.risk_manager import calculate_risk_with_compounding
+        from modules.executor import place_order
+        from modules.market_data import get_balance, get_ticker_price
+        from config import MAX_OPEN_TRADES, MIN_CONFIDENCE
+        from models import Trade
+
+        setups = get_crypto_setups()
+        if not setups:
+            return
+
+        open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
+        if open_count >= MAX_OPEN_TRADES:
+            return
+
+        balance = get_balance()
+        if balance < 1.0:
+            return
+
+        for symbol in list(setups.keys()):
+            try:
+                allowed, reason = can_reenter(symbol, db)
+                if not allowed:
+                    print(f"[crypto-entry] {symbol} blocked: {reason}")
+                    continue
+
+                sig = check_crypto_entry(symbol)
+                if not sig:
+                    continue
+
+                if sig["confidence"] < MIN_CONFIDENCE:
+                    print(f"[crypto-entry] {symbol} confidence {sig['confidence']:.1f}% < {MIN_CONFIDENCE}")
+                    clear_crypto_setup(symbol)
+                    continue
+
+                price = get_ticker_price(symbol)
+                risk = calculate_risk_with_compounding(
+                    price=price, signal=sig["signal"], confidence=sig["confidence"],
+                    atr=0, balance=balance, symbol=symbol,
+                )
+
+                result = place_order(
+                    symbol=symbol, signal=sig["signal"],
+                    position_units=risk["position_size_units"],
+                    stop_loss=sig["stop_loss"], take_profit=sig["take_profit"],
+                    confidence=sig["confidence"],
+                )
+
+                if result.get("success"):
+                    print(f"[crypto-entry] TRADE PLACED — {sig['signal']} {symbol} "
+                          f"@ {result['fill_price']} conf={sig['confidence']:.0f}%")
+                    clear_crypto_setup(symbol)
+                else:
+                    print(f"[crypto-entry] {symbol} order failed: {result.get('error')}")
+            except Exception as e:
+                print(f"[crypto-entry] {symbol} error: {e}")
+                clear_crypto_setup(symbol)
+    except Exception as e:
+        print(f"[crypto-entry] cycle error: {e}")
+    finally:
+        db.close()
+
+
 def _keep_alive():
     import time, requests as req
     domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
@@ -462,6 +576,11 @@ scheduler.add_job(run_forex_entry_check,      "interval", seconds=60)
 scheduler.add_job(run_forex_position_monitor, "interval", minutes=2)
 scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1)  # 00:01 UTC
 
+# Crypto jobs — same 3-layer strategy (Kronos + CRT + SMC)
+scheduler.add_job(run_crypto_kronos_bias,     "interval", minutes=15)
+scheduler.add_job(run_crypto_crt_scan,        "interval", minutes=15)
+scheduler.add_job(run_crypto_entry_check,     "interval", seconds=60)
+
 scheduler.start()
 
 
@@ -488,6 +607,11 @@ async def startup():
         
         threading.Thread(target=run_kronos_bias_update, daemon=True).start()
         threading.Thread(target=run_crt_scan, daemon=True).start()
+    
+    # Crypto 3-layer strategy bootstrap (Kronos + CRT + SMC)
+    if KRONOS_ENABLED:
+        threading.Thread(target=run_crypto_kronos_bias, daemon=True).start()
+        threading.Thread(target=run_crypto_crt_scan,    daemon=True).start()
     
     threading.Thread(target=refresh_signal_cache, daemon=True).start()
     threading.Thread(target=level1_bos_scan,      daemon=True).start()

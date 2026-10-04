@@ -7,7 +7,8 @@ import OverviewTab from"../components/OverviewTab";
 import SignalsTab from"../components/SignalsTab";
 import TradesTab from"../components/TradesTab";
 import ForexTab from"../components/ForexTab";
-import SettingsModal from"../components/SettingsModal";
+// SETTINGS REMOVED — no API-key / settings UI. Re-enable later if needed.
+// import SettingsModal from"../components/SettingsModal";
 import BuiltBy from"../components/BuiltBy";
 export default function Dashboard(){
   const{token,showToast}=useApp();
@@ -21,7 +22,6 @@ export default function Dashboard(){
   const[loading,setLoading]=useState(false);
   const[actionLoad,setActionLoad]=useState(false);
   const[lastUpdate,setLastUpdate]=useState(null);
-  const[showSettings,setShowSettings]=useState(false);
   const[backendDown,setBackendDown]=useState(false);
   const load=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
@@ -55,7 +55,7 @@ export default function Dashboard(){
   return(
     <div className="app-root">
       <DisclaimerBanner/>
-      <Navbar tab={tab} setTab={setTab} botStatus={botStatus} onSettings={()=>setShowSettings(true)} ctx={ctx}/>
+      <Navbar tab={tab} setTab={setTab} botStatus={botStatus} ctx={ctx}/>
       {backendDown&&<div style={{background:"rgba(255,77,109,0.08)",border:"1px solid rgba(255,77,109,0.2)",padding:"10px 24px",fontSize:11,color:"var(--sell)",fontFamily:"var(--font-mono)",display:"flex",alignItems:"center",gap:8}}>⚠ Backend unreachable — check Railway<button onClick={()=>load()} style={{marginLeft:"auto",fontSize:10,padding:"3px 10px",background:"rgba(255,77,109,0.1)",border:"1px solid rgba(255,77,109,0.3)",color:"var(--sell)",borderRadius:4,cursor:"pointer"}}>Retry</button></div>}
       <div className="page-body animate-in">
         {tab==="overview"&&<OverviewTab {...ctx}/>}
@@ -64,7 +64,6 @@ export default function Dashboard(){
         {tab==="forex"&&<ForexTab/>}
       </div>
       <BuiltBy/>
-      {showSettings&&<SettingsModal onClose={()=>setShowSettings(false)} onRefresh={()=>load(true)}/>}
     </div>
   );
 }
