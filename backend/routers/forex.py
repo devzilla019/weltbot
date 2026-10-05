@@ -110,25 +110,33 @@ def forex_signals() -> List[Dict]:
         for symbol in FOREX_PAIRS:
             try:
                 bias = get_cached_bias(symbol)
-                levels = get_cached_levels(symbol)
+                levels_by_tf = get_cached_levels(symbol)   # {timeframe: level}
                 price = get_current_price(symbol)
-                
-                if not levels:
+
+                if not levels_by_tf:
                     continue
-                
+
+                # Prefer the daily range for the headline PDH/PDL
+                daily = levels_by_tf.get('1d') or next(iter(levels_by_tf.values()))
+
                 signal = {
                     'symbol': symbol,
                     'current_price': price,
-                    'pdh': levels.get('pdh'),
-                    'pdl': levels.get('pdl'),
+                    'pdh': daily.get('range_high'),
+                    'pdl': daily.get('range_low'),
+                    'timeframe': daily.get('timeframe', '1d'),
+                    'ranges': {
+                        tf: {'high': lv.get('range_high'), 'low': lv.get('range_low')}
+                        for tf, lv in levels_by_tf.items()
+                    },
                     'kronos_bias': bias.get('bias', 'NEUTRAL') if bias else 'NEUTRAL',
                     'kronos_confidence_boost': bias.get('confidence_boost', 0) if bias else 0,
                     'crt_status': 'WAITING',
                     'predicted_change': bias.get('predicted_change_pct', 0) if bias else 0
                 }
-                
+
                 signals.append(signal)
-                
+
             except Exception as e:
                 logger.error(f"[forex-api] signal error {symbol}: {e}")
                 continue
@@ -199,22 +207,26 @@ def update_kronos_bias(symbol: str) -> Dict:
 @router.post("/update-crt/{symbol}")
 def update_crt_levels(symbol: str) -> Dict:
     """
-    Manually trigger CRT level update for a symbol
+    Manually trigger a multi-timeframe CRT range update for a symbol.
     """
     try:
         from modules.market_data_forex import get_candles
-        from modules.crt_detector import calculate_pdh_pdl
-        
-        daily = get_candles(symbol, timeframe='1d', limit=5)
-        if daily is None:
-            raise HTTPException(status_code=400, detail="Failed to fetch daily candles")
-        
-        levels = calculate_pdh_pdl(symbol, daily)
-        if levels is None:
-            raise HTTPException(status_code=500, detail="PDH/PDL calculation failed")
-        
-        return levels
-        
+        from modules.crt_detector import calculate_range, CRT_TIMEFRAMES
+
+        out = {}
+        for tf in CRT_TIMEFRAMES:
+            candles = get_candles(symbol, timeframe=tf, limit=60)
+            if candles is None or len(candles) < 2:
+                continue
+            level = calculate_range(symbol, candles, timeframe=tf)
+            if level:
+                out[tf] = level
+
+        if not out:
+            raise HTTPException(status_code=500, detail="CRT range calculation failed")
+
+        return {"symbol": symbol, "ranges": out}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -252,11 +264,17 @@ def forex_pair_detail(symbol: str) -> Dict:
         finally:
             db.close()
         
+        # levels is {timeframe: level}; expose the daily one as the headline
+        daily = levels.get('1d') if isinstance(levels, dict) else None
+        if daily is None and isinstance(levels, dict) and levels:
+            daily = next(iter(levels.values()))
+
         return {
             'symbol': symbol,
             'current_price': price,
             'kronos_bias': bias,
-            'crt_levels': levels,
+            'crt_levels': daily,
+            'crt_ranges': levels,
             'open_trade': {
                 'id': open_trade.id,
                 'signal': open_trade.signal,

@@ -24,8 +24,12 @@ export default function CRTSignalCard({symbol,bias,levels}){
   const crtText=inTrade?"IN TRADE":"WAITING";
 
   const fmt=v=>v==null?"—":Number(v).toFixed(5);
-  const pos=(price&&levels?.pdh&&levels?.pdl)?Math.max(0,Math.min(100,((price-levels.pdl)/(levels.pdh-levels.pdl))*100)):50;
-  const range=(levels?.pdh&&levels?.pdl)?(levels.pdh-levels.pdl).toFixed(5):"—";
+  const hi=levels?.range_high??levels?.pdh;
+  const lo=levels?.range_low??levels?.pdl;
+  const tf=levels?.timeframe||"1d";
+  const pos=(price&&hi&&lo)?Math.max(0,Math.min(100,((price-lo)/(hi-lo))*100)):50;
+  const range=(hi&&lo)?(hi-lo).toFixed(5):"—";
+  const ranges=details?.crt_ranges||{};
 
   return(
     <div className={`pair-card ${cls}`}>
@@ -41,12 +45,21 @@ export default function CRTSignalCard({symbol,bias,levels}){
         <>
           <div className="range-meter"><div className="range-marker" style={{left:`${pos}%`}}/></div>
           <div className="range-labels">
-            <span style={{color:"var(--sell)"}}>PDH {fmt(levels.pdh)}</span>
-            <span style={{color:"var(--buy)"}}>PDL {fmt(levels.pdl)}</span>
+            <span style={{color:"var(--sell)"}}>H {fmt(hi)}</span>
+            <span style={{color:"var(--buy)"}}>L {fmt(lo)}</span>
           </div>
           <div style={{textAlign:"center",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",marginTop:6}}>
-            range {range}
+            {tf.toUpperCase()} range {range}
           </div>
+          {Object.keys(ranges).length>1&&(
+            <div style={{display:"flex",gap:4,justifyContent:"center",marginTop:6,flexWrap:"wrap"}}>
+              {Object.entries(ranges).map(([t,r])=>(
+                <span key={t} className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>
+                  {t.toUpperCase()} {r.high!=null?Number(r.high).toFixed(3):"—"}
+                </span>
+              ))}
+            </div>
+          )}
         </>
       )}
 

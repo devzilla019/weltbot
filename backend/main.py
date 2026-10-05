@@ -5,7 +5,7 @@ WeltBot v5.0
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import engine, Base, SessionLocal
+from database import engine, Base, SessionLocal, run_light_migrations
 from models import SignalCache, BotState, Trade
 from routers import signals, trades, analytics, forex, crypto_strategy
 # AUTH DISABLED — re-enable later by importing + including auth.router below
@@ -15,6 +15,7 @@ from datetime import datetime
 import json, os, threading
 
 Base.metadata.create_all(bind=engine)
+run_light_migrations()
 
 app = FastAPI(title="WeltBot", version="5.0.0")
 
@@ -273,53 +274,49 @@ def run_kronos_bias_update():
 
 
 def run_crt_scan():
-    """Scan for CRT setups (sweep + confirmation)"""
+    """Scan for CRT setups across 1d / 4h / 1h / 15m (sweep + close inside)."""
     global _forex_active_setups
     from config import FOREX_ENABLED
     if not FOREX_ENABLED:
         return
-    
+
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
         if not state.is_running or state.paused:
             return
-        
-        from modules.market_data_forex import get_candles
-        from modules.crt_detector import get_cached_levels, detect_sweep, validate_with_kronos, store_crt_level
+
+        from modules.crt_detector import scan_symbol, validate_with_kronos, store_crt_level, CRT_TIMEFRAMES
         from modules.kronos_engine import get_cached_bias
         from config import FOREX_PAIRS
-        
-        print("[crt] scanning for setups")
-        
+
+        print(f"[crt] scanning {len(FOREX_PAIRS)} pairs across {CRT_TIMEFRAMES}")
+
         for symbol in FOREX_PAIRS:
             try:
                 if symbol in _forex_active_setups:
                     continue
-                
-                levels = get_cached_levels(symbol)
-                if not levels:
+
+                setups = scan_symbol(symbol)
+                if not setups:
                     continue
-                
-                h1 = get_candles(symbol, timeframe='1h', limit=10)
-                if h1 is None or len(h1) < 3:
-                    continue
-                
-                sweep = detect_sweep(symbol, h1, levels['pdh'], levels['pdl'])
-                if not sweep:
-                    continue
-                
+
+                # Prefer the highest timeframe setup (1d > 4h > 1h > 15m)
+                setups.sort(key=lambda s: CRT_TIMEFRAMES.index(s["timeframe"]))
                 bias = get_cached_bias(symbol)
-                if not validate_with_kronos(sweep, bias):
-                    continue
-                
-                _forex_active_setups[symbol] = sweep
-                store_crt_level(sweep)
-                print(f"[crt] {symbol} setup confirmed — {sweep['direction']} target={sweep['target']:.5f}")
-                
+
+                for sweep in setups:
+                    if not validate_with_kronos(sweep, bias):
+                        continue
+                    _forex_active_setups[symbol] = sweep
+                    store_crt_level(sweep)
+                    print(f"[crt] {symbol} {sweep['timeframe']} setup confirmed — "
+                          f"{sweep['direction']} target={sweep['target']:.5f}")
+                    break
+
             except Exception as e:
                 print(f"[crt] error {symbol}: {e}")
-        
+
         print(f"[crt] scan complete — {len(_forex_active_setups)} active setups")
     except Exception as e:
         print(f"[crt] scan cycle error: {e}")
@@ -404,17 +401,17 @@ def run_forex_position_monitor():
 
 
 def run_daily_pdh_pdl_reset():
-    """Reset PDH/PDL at 00:01 UTC daily"""
+    """Reset ranges at 00:01 UTC daily (all timeframes)."""
     global _forex_active_setups
     from config import FOREX_ENABLED
     if not FOREX_ENABLED:
         return
     
     try:
-        from modules.crt_detector import update_pdh_pdl_all_pairs
-        print("[crt] daily PDH/PDL reset (00:01 UTC)")
+        from modules.crt_detector import update_all_ranges
+        print("[crt] daily range reset (00:01 UTC)")
         _forex_active_setups = {}
-        update_pdh_pdl_all_pairs()
+        update_all_ranges()
     except Exception as e:
         print(f"[crt] daily reset error: {e}")
 
@@ -620,8 +617,8 @@ async def startup():
         else:
             print("[kronos] disabled — using neutral bias")
 
-        from modules.crt_detector import update_pdh_pdl_all_pairs
-        threading.Thread(target=update_pdh_pdl_all_pairs, daemon=True).start()
+        from modules.crt_detector import update_all_ranges
+        threading.Thread(target=update_all_ranges, daemon=True).start()
 
         threading.Thread(target=run_kronos_bias_update, daemon=True).start()
         threading.Thread(target=run_crt_scan, daemon=True).start()

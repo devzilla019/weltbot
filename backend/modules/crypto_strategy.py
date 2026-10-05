@@ -100,18 +100,33 @@ def get_all_crypto_biases() -> Dict[str, dict]:
 
 # ── LAYER 2: CRT setup ────────────────────────────────────────────────────────
 
-def update_crypto_levels(symbol: str) -> Optional[dict]:
-    """Compute previous-day high/low for a crypto symbol."""
-    try:
-        from modules.market_data import fetch_ohlcv
-        from modules.crt_detector import calculate_pdh_pdl
+# Crypto CRT timeframes (Binance intervals)
+CRYPTO_CRT_TIMEFRAMES = ["1d", "4h", "1h", "15m"]
 
-        h1 = fetch_ohlcv(symbol, interval="1h", limit=200)
-        daily = _daily_from_h1(h1)
+
+def _crypto_candles(symbol: str, timeframe: str, limit: int = 60):
+    """Fetch Binance candles with a 'timestamp' column for the CRT detector."""
+    from modules.market_data import fetch_ohlcv
+
+    df = fetch_ohlcv(symbol, interval=timeframe, limit=limit)
+    if df is None or df.empty:
+        return None
+    out = df.reset_index()
+    if "timestamp" not in out.columns:
+        out = out.rename(columns={out.columns[0]: "timestamp"})
+    return out
+
+
+def update_crypto_levels(symbol: str) -> Optional[dict]:
+    """Mark the previous daily range for a crypto symbol (legacy helper)."""
+    try:
+        from modules.crt_detector import calculate_range
+
+        daily = _crypto_candles(symbol, "1d", 5)
         if daily is None or len(daily) < 2:
             return None
 
-        levels = calculate_pdh_pdl(symbol, daily)
+        levels = calculate_range(symbol, daily, timeframe="1d")
         if levels:
             _crypto_levels[symbol] = levels
         return levels
@@ -121,36 +136,45 @@ def update_crypto_levels(symbol: str) -> Optional[dict]:
 
 
 def scan_crypto_crt(symbol: str) -> Optional[dict]:
-    """Detect a CRT sweep on H1 and validate against Kronos bias."""
+    """
+    Scan a crypto symbol across 1d / 4h / 1h / 15m for a CRT sweep,
+    validated against Kronos bias (optional — neutral mode allowed).
+    """
     try:
-        from modules.market_data import fetch_ohlcv
-        from modules.crt_detector import detect_sweep, validate_with_kronos
-
-        levels = _crypto_levels.get(symbol) or update_crypto_levels(symbol)
-        if not levels:
-            return None
-
-        h1 = fetch_ohlcv(symbol, interval="1h", limit=10)
-        if h1 is None or len(h1) < 3:
-            return None
-
-        # detect_sweep expects a 'timestamp' column
-        h1r = h1.reset_index()
-        if "timestamp" not in h1r.columns:
-            h1r = h1r.rename(columns={h1r.columns[0]: "timestamp"})
-
-        sweep = detect_sweep(symbol, h1r, levels["pdh"], levels["pdl"])
-        if not sweep:
-            return None
+        from modules.crt_detector import calculate_range, detect_sweep, validate_with_kronos
 
         bias = get_crypto_bias(symbol)
-        if not validate_with_kronos(sweep, bias):
+        found = []
+
+        for tf in CRYPTO_CRT_TIMEFRAMES:
+            candles = _crypto_candles(symbol, tf, 60)
+            if candles is None or len(candles) < 3:
+                continue
+
+            level = calculate_range(symbol, candles, timeframe=tf)
+            if not level:
+                continue
+
+            sweep = detect_sweep(symbol, candles, level["range_high"],
+                                 level["range_low"], timeframe=tf)
+            if sweep:
+                found.append(sweep)
+
+        if not found:
             return None
 
-        _crypto_setups[symbol] = sweep
-        logger.info(f"[crypto-crt] {symbol} SWEPT {sweep['sweep_type']} — "
-                    f"{sweep['direction']} setup confirmed")
-        return sweep
+        # Prefer the highest timeframe
+        found.sort(key=lambda s: CRYPTO_CRT_TIMEFRAMES.index(s["timeframe"]))
+
+        for sweep in found:
+            if not validate_with_kronos(sweep, bias):
+                continue
+            _crypto_setups[symbol] = sweep
+            logger.info(f"[crypto-crt] {symbol} {sweep['timeframe']} SWEPT "
+                        f"{sweep['sweep_type']} — {sweep['direction']} setup confirmed")
+            return sweep
+
+        return None
     except Exception as e:
         logger.error(f"[crypto-crt] {symbol} scan error: {e}")
         return None

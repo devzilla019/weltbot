@@ -234,8 +234,9 @@ def check_entry_condition(crt_setup: Dict, current_price: float, df_5m: pd.DataF
             'fvg': fvg,
             'liquidity_grab': liq_grab,
             'crt_setup': crt_setup['sweep_type'],
-            'pdh': crt_setup['pdh'],
-            'pdl': crt_setup['pdl'],
+            'crt_timeframe': crt_setup.get('timeframe', '1d'),
+            'pdh': crt_setup.get('range_high', crt_setup.get('pdh')),
+            'pdl': crt_setup.get('range_low', crt_setup.get('pdl')),
             'timestamp': datetime.utcnow().isoformat()
         }
         

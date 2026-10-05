@@ -87,6 +87,7 @@ class CRTLevel(Base):
     id              = Column(Integer, primary_key=True)
     symbol          = Column(String, index=True)
     date            = Column(String, index=True)
+    timeframe       = Column(String, default="1d", index=True)   # 1d / 4h / 1h / 15m
     pdh             = Column(Float)
     pdl             = Column(Float)
     sweep_type      = Column(String, default="NONE")
