@@ -34,6 +34,25 @@ def get_last_error() -> Optional[str]:
     return _last_error
 
 
+def _num(v, default: float = 0.0) -> float:
+    """Coerce a value to float, tolerating None / dict / str.
+
+    Capital.com sometimes nests values, e.g.
+      balance = {"balance": 10000, "deposit": 10000, "profitLoss": 0}
+    """
+    if v is None:
+        return default
+    if isinstance(v, dict):
+        for key in ("balance", "amount", "value", "mid", "lastTraded"):
+            if key in v:
+                return _num(v[key], default)
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── Session ───────────────────────────────────────────────────────────────────
 
 class CapitalSession:
@@ -275,15 +294,24 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
             logger.warning(f"[capital] no candles for {epic} {resolution}")
             return None
 
+        def _mid(node) -> float:
+            """Capital.com price node: {"bid": x, "ask": y, "lastTraded": z}."""
+            if isinstance(node, dict):
+                for key in ("mid", "lastTraded", "bid", "ask"):
+                    if node.get(key) is not None:
+                        return _num(node[key])
+                return 0.0
+            return _num(node)
+
         rows = []
         for p in prices:
             try:
                 rows.append({
                     "timestamp": p["snapshotTime"],
-                    "open":  float(p["openPrice"]["mid"]),
-                    "high":  float(p["highPrice"]["mid"]),
-                    "low":   float(p["lowPrice"]["mid"]),
-                    "close": float(p["closePrice"]["mid"]),
+                    "open":  _mid(p.get("openPrice")),
+                    "high":  _mid(p.get("highPrice")),
+                    "low":   _mid(p.get("lowPrice")),
+                    "close": _mid(p.get("closePrice")),
                     "volume": 0,
                 })
             except (KeyError, TypeError, ValueError):
@@ -315,8 +343,8 @@ def get_current_price(symbol: str) -> float:
 
     try:
         snap = resp.json().get("snapshot", {})
-        bid = float(snap.get("bid", 0) or 0)
-        offer = float(snap.get("offer", 0) or 0)
+        bid = _num(snap.get("bid"))
+        offer = _num(snap.get("offer"))
         if bid and offer:
             return (bid + offer) / 2
         return bid or offer or 0.0
@@ -347,20 +375,22 @@ def get_open_positions() -> List[Dict]:
                 pos = item.get("position", {})
                 market = item.get("market", {})
                 direction = pos.get("direction", "BUY")
-                bid = float(market.get("bid", 0) or 0)
-                offer = float(market.get("offer", 0) or 0)
+                bid = _num(market.get("bid"))
+                offer = _num(market.get("offer"))
                 current = (bid + offer) / 2 if (bid and offer) else (bid or offer or 0.0)
+                sl = _num(pos.get("stopLevel")) if pos.get("stopLevel") else None
+                tp = _num(pos.get("limitLevel")) if pos.get("limitLevel") else None
                 out.append({
                     "id":             pos.get("dealId"),
                     "symbol":         from_epic(market.get("epic", "")),
                     "epic":           market.get("epic"),
                     "signal":         direction,
-                    "size":           float(pos.get("size", 0) or 0),
-                    "entry_price":    float(pos.get("openLevel", 0) or 0),
+                    "size":           _num(pos.get("size")),
+                    "entry_price":    _num(pos.get("openLevel")),
                     "current_price":  current,
-                    "unrealized_pnl": float(pos.get("upl", 0) or 0),
-                    "sl":             float(pos["stopLevel"]) if pos.get("stopLevel") else None,
-                    "tp":             float(pos["limitLevel"]) if pos.get("limitLevel") else None,
+                    "unrealized_pnl": _num(pos.get("upl")),
+                    "sl":             sl,
+                    "tp":             tp,
                     "open_time":      pos.get("createdDateUTC"),
                 })
             except Exception as e:
@@ -378,6 +408,12 @@ def get_open_positions() -> List[Dict]:
 def get_capital_balance() -> Dict:
     """
     Fetch account balance.
+
+    Capital.com returns:
+      accounts[0].balance = {"balance": 10000, "deposit": 10000,
+                             "profitLoss": 0, "available": 10000}
+      accounts[0].currency = "USD"
+
     Returns: {balance, profit_loss, deposit, available, currency, connected}
     """
     empty = {"balance": 0.0, "profit_loss": 0.0, "deposit": 0.0,
@@ -391,16 +427,30 @@ def get_capital_balance() -> Dict:
         accounts = resp.json().get("accounts", [])
         if not accounts:
             return empty
+
         a = accounts[0]
-        balance = float(a.get("balance", 0) or 0)
-        profit_loss = float(a.get("profitLoss", 0) or 0)
-        deposit = float(a.get("deposit", 0) or 0)
+        raw = a.get("balance", {})
+
+        # `balance` may be a nested dict OR a flat number
+        if isinstance(raw, dict):
+            balance     = _num(raw.get("balance"))
+            deposit     = _num(raw.get("deposit"))
+            profit_loss = _num(raw.get("profitLoss"))
+            available   = _num(raw.get("available"), balance)
+        else:
+            balance     = _num(raw)
+            deposit     = _num(a.get("deposit"))
+            profit_loss = _num(a.get("profitLoss"))
+            available   = _num(a.get("available"), balance)
+
         return {
             "balance":     balance,
             "profit_loss": profit_loss,
             "deposit":     deposit,
-            "available":   float(a.get("available", balance) or balance),
+            "available":   available,
             "currency":    a.get("currency", "USD"),
+            "account_id":  a.get("accountId"),
+            "account_name": a.get("accountName"),
             "connected":   True,
         }
     except Exception as e:
