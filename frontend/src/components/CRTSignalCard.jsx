@@ -12,7 +12,7 @@ export default function CRTSignalCard({symbol,bias,levels}){
       catch(e){/* silent */}
     };
     fetchDetails();
-    const t=setInterval(fetchDetails,15000);
+    const t=setInterval(fetchDetails,45000);
     return()=>{alive=false;clearInterval(t);};
   },[symbol]);
 

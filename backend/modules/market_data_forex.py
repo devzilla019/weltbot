@@ -42,24 +42,42 @@ class CapitalSession:
     Auto-renews after 9 minutes of inactivity (session expires at 10 min).
     """
 
+    # Backoff schedule (seconds) applied after consecutive login failures.
+    # Prevents hammering Capital.com and tripping the 429 rate limiter.
+    _BACKOFF = [30, 60, 120, 300, 600]
+
     def __init__(self):
         self.cst: Optional[str] = None
         self.security_token: Optional[str] = None
         self.last_login: float = 0.0
         self._lock = threading.Lock()
+        self._fail_count: int = 0
+        self._next_attempt: float = 0.0
+        self._last_login_error: Optional[str] = None
 
     def _configured(self) -> bool:
         from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD
         return bool(CAPITAL_API_KEY and CAPITAL_EMAIL and CAPITAL_PASSWORD)
 
-    def login(self) -> bool:
-        """Authenticate and store CST + X-SECURITY-TOKEN."""
+    def _backoff_remaining(self) -> float:
+        return max(0.0, self._next_attempt - time.time())
+
+    def login(self, force: bool = False) -> bool:
+        """Authenticate and store CST + X-SECURITY-TOKEN (with backoff on failure)."""
         global _last_error
         from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD, CAPITAL_BASE_URL
 
         if not self._configured():
             _last_error = "Capital.com not configured (CAPITAL_API_KEY / EMAIL / PASSWORD)"
             return False
+
+        # Respect the backoff window unless explicitly forced
+        if not force:
+            remaining = self._backoff_remaining()
+            if remaining > 0:
+                _last_error = (f"login backoff active ({remaining:.0f}s) — "
+                               f"last error: {self._last_login_error}")
+                return False
 
         try:
             url = f"{CAPITAL_BASE_URL}/api/v1/session"
@@ -72,25 +90,55 @@ class CapitalSession:
             resp = requests.post(url, headers=headers, json=body, timeout=20)
 
             if resp.status_code not in (200, 201):
-                _last_error = f"login HTTP {resp.status_code}: {resp.text[:200]}"
-                logger.error(f"[capital] login failed: {_last_error}")
+                detail = resp.text[:200]
+                # Friendly hints for the common Capital.com errors
+                if "error.null.accountId" in detail:
+                    hint = ("Capital.com returned error.null.accountId — the API key is not "
+                            "linked to a demo account. Create the API key from the DEMO "
+                            "account (capital.com demo dashboard → Settings → API integrations), "
+                            "and make sure CAPITAL_DEMO=true.")
+                elif "error.too-many.requests" in detail or resp.status_code == 429:
+                    hint = ("Capital.com rate limit hit (429). Backing off — this usually "
+                            "clears within a few minutes.")
+                elif resp.status_code == 401:
+                    hint = ("Capital.com rejected the credentials (401). Check CAPITAL_EMAIL "
+                            "and CAPITAL_PASSWORD are your Capital.com login, and that 2FA "
+                            "is enabled on the account.")
+                else:
+                    hint = detail
+
+                self._last_login_error = f"HTTP {resp.status_code}: {detail}"
+                _last_error = f"login HTTP {resp.status_code}: {detail} — {hint}"
+                self._fail_count += 1
+                wait = self._BACKOFF[min(self._fail_count - 1, len(self._BACKOFF) - 1)]
+                self._next_attempt = time.time() + wait
+                logger.error(f"[capital] login failed ({self._fail_count}): {_last_error} "
+                             f"— retrying in {wait}s")
                 return False
 
             self.cst = resp.headers.get("CST")
             self.security_token = resp.headers.get("X-SECURITY-TOKEN")
             if not self.cst or not self.security_token:
                 _last_error = "login succeeded but tokens missing in response headers"
+                self._fail_count += 1
+                self._next_attempt = time.time() + 60
                 logger.error(f"[capital] {_last_error}")
                 return False
 
             self.last_login = time.time()
+            self._fail_count = 0
+            self._next_attempt = 0.0
+            self._last_login_error = None
             _last_error = None
             logger.info("[capital] session established")
             return True
 
         except Exception as e:
             _last_error = str(e)
-            logger.error(f"[capital] login error: {e}")
+            self._fail_count += 1
+            wait = self._BACKOFF[min(self._fail_count - 1, len(self._BACKOFF) - 1)]
+            self._next_attempt = time.time() + wait
+            logger.error(f"[capital] login error: {e} — retrying in {wait}s")
             return False
 
     def _ensure_session(self) -> bool:
@@ -189,10 +237,20 @@ def get_session() -> CapitalSession:
 
 
 def reconnect() -> None:
-    """Force a fresh login."""
+    """Force a fresh login (bypasses backoff)."""
     _session.cst = None
     _session.security_token = None
-    _session.login()
+    _session.login(force=True)
+
+
+def session_status() -> Dict:
+    """Diagnostic info about the Capital.com session (for the UI)."""
+    return {
+        "authenticated": bool(_session.cst and _session.security_token),
+        "fail_count": _session._fail_count,
+        "backoff_remaining": round(_session._backoff_remaining(), 1),
+        "last_error": _session._last_login_error,
+    }
 
 
 # ── Candles ───────────────────────────────────────────────────────────────────
@@ -463,12 +521,18 @@ def test_connection() -> Dict:
         report["error"] = "CAPITAL_API_KEY / CAPITAL_EMAIL / CAPITAL_PASSWORD missing"
         return report
 
+    # Force a fresh login attempt so the button always gives a real answer
+    _session.cst = None
+    _session.security_token = None
+    _session.login(force=True)
+
     bal = get_capital_balance()
     if bal.get("connected"):
         report["connected"] = True
         report["account"] = bal
     else:
         report["error"] = _last_error or "Could not read account balance"
+        report["session"] = session_status()
         return report
 
     for sym in ("EURUSD", "XAUUSD"):
