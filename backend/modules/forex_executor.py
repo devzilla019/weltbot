@@ -1,8 +1,11 @@
 """
 backend/modules/forex_executor.py
-MetaApi order execution for Forex/Metals
+MetaApi order execution for Forex/Metals.
+
+All MetaApi calls go through market_data_forex's dedicated event loop —
+never create a new event loop here (that causes the "bound to a different
+event loop" error).
 """
-import asyncio
 import logging
 from typing import Dict, Optional
 from datetime import datetime
@@ -10,60 +13,6 @@ from database import SessionLocal
 from models import ForexTrade
 
 logger = logging.getLogger(__name__)
-
-
-async def _place_order_async(symbol: str, signal: str, lots: float, sl: float, tp: float) -> Dict:
-    """
-    Place market order via MetaApi
-    
-    Args:
-        symbol: Trading pair
-        signal: BUY or SELL
-        lots: Position size in lots
-        sl: Stop loss price
-        tp: Take profit price
-    
-    Returns:
-        dict with success, position_id, fill_price
-    """
-    try:
-        from modules.market_data_forex import _get_metaapi_connection
-        
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return {'success': False, 'error': 'MetaApi connection failed'}
-        
-        if signal == 'BUY':
-            result = await conn.create_market_buy_order(
-                symbol=symbol,
-                volume=lots,
-                stop_loss=sl,
-                take_profit=tp
-            )
-        else:
-            result = await conn.create_market_sell_order(
-                symbol=symbol,
-                volume=lots,
-                stop_loss=sl,
-                take_profit=tp
-            )
-        
-        if result.get('orderId'):
-            logger.info(f"[forex] order placed — {signal} {symbol} {lots} lots @ {result.get('price', 0):.5f}")
-            return {
-                'success': True,
-                'position_id': result['positionId'] if 'positionId' in result else result['orderId'],
-                'fill_price': result.get('price', 0),
-                'order_id': result['orderId']
-            }
-        else:
-            error_msg = result.get('message', 'Unknown error')
-            logger.error(f"[forex] order failed — {symbol}: {error_msg}")
-            return {'success': False, 'error': error_msg}
-        
-    except Exception as e:
-        logger.error(f"[forex] execution error {symbol}: {e}")
-        return {'success': False, 'error': str(e)}
 
 
 def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
@@ -90,15 +39,8 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
         if lots <= 0:
             return {'success': False, 'error': 'Invalid position size'}
         
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        result = loop.run_until_complete(
-            _place_order_async(symbol, signal, lots, sl, tp)
-        )
+        from modules.market_data_forex import place_order as _metaapi_place_order
+        result = _metaapi_place_order(symbol, signal, lots, sl, tp)
         
         if result['success']:
             db = SessionLocal()
@@ -198,24 +140,6 @@ def calculate_position_size(symbol: str, entry: float, sl: float, confidence: fl
         return 0.01
 
 
-async def _close_position_async(position_id: str) -> bool:
-    """Close position via MetaApi"""
-    try:
-        from modules.market_data_forex import _get_metaapi_connection
-        
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return False
-        
-        await conn.close_position(position_id)
-        logger.info(f"[forex] position closed — id={position_id}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"[forex] close position error {position_id}: {e}")
-        return False
-
-
 def close_forex_position(position_id: str, trade_id: int, pnl: float) -> bool:
     """
     Close forex position and update database
@@ -228,13 +152,8 @@ def close_forex_position(position_id: str, trade_id: int, pnl: float) -> bool:
     Returns:
         True if successful
     """
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    success = loop.run_until_complete(_close_position_async(position_id))
+    from modules.market_data_forex import close_position as _metaapi_close
+    success = _metaapi_close(position_id)
     
     if success:
         db = SessionLocal()

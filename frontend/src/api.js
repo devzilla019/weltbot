@@ -41,4 +41,6 @@ export const forexApi = {
   getPair:      (symbol) => req("GET",  `/api/forex/pair/${symbol}`),
   updateBias:   (symbol) => req("POST", `/api/forex/update-bias/${symbol}`),
   updateCRT:    (symbol) => req("POST", `/api/forex/update-crt/${symbol}`),
+  testConnection: ()     => req("GET",  "/api/forex/test-connection"),
+  kronosStatus:   ()     => req("GET",  "/api/forex/kronos-status"),
 };

@@ -15,64 +15,127 @@ _kronos_model = None
 _kronos_tokenizer = None
 _kronos_predictor = None
 _kronos_bias_cache: Dict[str, dict] = {}
+_kronos_status: Dict[str, object] = {"state": "not_started", "error": None, "repo": None}
+
+KRONOS_REPO_URL = "https://github.com/shiyu-coder/Kronos.git"
+
+
+def _candidate_repo_paths():
+    here = os.path.dirname(os.path.abspath(__file__))          # backend/modules
+    backend_dir = os.path.dirname(here)                        # backend
+    repo_root = os.path.dirname(backend_dir)                   # repo root
+    return [
+        os.path.join(backend_dir, "Kronos"),
+        os.path.join(repo_root, "Kronos"),
+        os.path.join(here, "Kronos"),
+        os.getenv("KRONOS_REPO_PATH", ""),
+    ]
+
+
+def _ensure_kronos_repo() -> Optional[str]:
+    """
+    Return a path containing the Kronos `model` package, cloning the repo
+    on the fly if it isn't present (Railway build may have skipped it).
+    """
+    import sys
+
+    # 1) Already importable?
+    try:
+        import model  # noqa: F401
+        return os.path.dirname(os.path.dirname(model.__file__))
+    except Exception:
+        pass
+
+    # 2) Existing clone on disk?
+    for path in _candidate_repo_paths():
+        if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "model")):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            return path
+
+    # 3) Clone it now
+    target = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Kronos")
+    try:
+        import subprocess
+        logger.info(f"[kronos] repo not found — cloning into {target}")
+        subprocess.run(
+            ["git", "clone", "--depth", "1", KRONOS_REPO_URL, target],
+            check=True, capture_output=True, timeout=180,
+        )
+        if os.path.exists(os.path.join(target, "model")):
+            if target not in sys.path:
+                sys.path.insert(0, target)
+            logger.info("[kronos] clone complete")
+            return target
+    except Exception as e:
+        logger.error(f"[kronos] auto-clone failed: {e}")
+
+    return None
 
 
 def _load_kronos_model():
     """Load Kronos model once at startup"""
-    global _kronos_model, _kronos_tokenizer, _kronos_predictor
-    
+    global _kronos_model, _kronos_tokenizer, _kronos_predictor, _kronos_status
+
     if _kronos_model is not None:
         return
-    
+
     from config import KRONOS_ENABLED, KRONOS_MODEL_PATH, KRONOS_TOKENIZER
-    
+
     if not KRONOS_ENABLED:
+        _kronos_status = {"state": "disabled", "error": None, "repo": None}
         logger.info("[kronos] disabled via config")
         return
-    
+
+    _kronos_status = {"state": "loading", "error": None, "repo": None}
+
     try:
-        import torch
-        import sys
-        
-        # Search common locations for the cloned Kronos repo
-        here = os.path.dirname(os.path.abspath(__file__))          # backend/modules
-        backend_dir = os.path.dirname(here)                        # backend
-        repo_root = os.path.dirname(backend_dir)                   # repo root
-        candidates = [
-            os.path.join(backend_dir, "Kronos"),
-            os.path.join(repo_root, "Kronos"),
-            os.path.join(here, "Kronos"),
-            os.getenv("KRONOS_REPO_PATH", ""),
-        ]
-        for kronos_repo in candidates:
-            if kronos_repo and os.path.exists(kronos_repo):
-                if kronos_repo not in sys.path:
-                    sys.path.insert(0, kronos_repo)
-                logger.info(f"[kronos] using repo at {kronos_repo}")
-                break
-        
+        import torch  # noqa: F401
+
+        repo = _ensure_kronos_repo()
+        if not repo:
+            _kronos_status = {
+                "state": "error",
+                "error": "Kronos repo not found and auto-clone failed. "
+                         "Ensure `git` is available and the build can reach GitHub.",
+                "repo": None,
+            }
+            logger.error(f"[kronos] {_kronos_status['error']}")
+            return
+
         from model import Kronos, KronosTokenizer, KronosPredictor
-        
+
         logger.info(f"[kronos] loading tokenizer from {KRONOS_TOKENIZER}")
         _kronos_tokenizer = KronosTokenizer.from_pretrained(KRONOS_TOKENIZER)
-        
+
         logger.info(f"[kronos] loading model from {KRONOS_MODEL_PATH}")
         _kronos_model = Kronos.from_pretrained(KRONOS_MODEL_PATH)
         _kronos_model.to('cpu')
         _kronos_model.eval()
-        
+
         _kronos_predictor = KronosPredictor(
             model=_kronos_model,
             tokenizer=_kronos_tokenizer,
-            max_context=2048
+            max_context=2048,
         )
-        
+
+        _kronos_status = {"state": "ready", "error": None, "repo": repo}
         logger.info("[kronos] model loaded successfully (CPU mode)")
     except Exception as e:
+        _kronos_status = {"state": "error", "error": str(e), "repo": None}
         logger.error(f"[kronos] failed to load model: {e}")
         _kronos_model = None
         _kronos_tokenizer = None
         _kronos_predictor = None
+
+
+def get_kronos_status() -> Dict:
+    """Diagnostic info for the UI / health endpoint."""
+    return {
+        **_kronos_status,
+        "available": _kronos_predictor is not None,
+        "cached_biases": len(_kronos_bias_cache),
+    }
 
 
 def is_kronos_available() -> bool:

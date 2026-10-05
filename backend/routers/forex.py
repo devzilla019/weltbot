@@ -71,6 +71,30 @@ def forex_balance() -> Dict:
         return {'enabled': True, 'connected': False, 'balance': 0.0, 'equity': 0.0}
 
 
+@router.get("/test-connection")
+def forex_test_connection() -> Dict:
+    """
+    Full MetaApi / MT5 connectivity test for the dashboard button.
+    Checks: env vars → token auth → account info → candle fetch.
+    """
+    try:
+        from modules.market_data_forex import test_connection
+        return test_connection()
+    except Exception as e:
+        logger.error(f"[forex-api] test-connection error: {e}")
+        return {'connected': False, 'error': str(e)}
+
+
+@router.get("/kronos-status")
+def kronos_status() -> Dict:
+    """Kronos model load state (for diagnostics)."""
+    try:
+        from modules.kronos_engine import get_kronos_status
+        return get_kronos_status()
+    except Exception as e:
+        return {'state': 'error', 'error': str(e), 'available': False}
+
+
 @router.get("/signals")
 def forex_signals() -> List[Dict]:
     """

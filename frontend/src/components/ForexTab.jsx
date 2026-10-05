@@ -6,13 +6,28 @@ export default function ForexTab(){
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(true);
   const[err,setErr]=useState(null);
+  const[test,setTest]=useState(null);
+  const[testing,setTesting]=useState(false);
+  const[kronos,setKronos]=useState(null);
 
   const load=async()=>{
     try{const d=await forexApi.getStatus();setData(d);setErr(null);}
     catch(e){setErr(e.message);}
     finally{setLoading(false);}
   };
-  useEffect(()=>{load();const t=setInterval(load,10000);return()=>clearInterval(t);},[]);
+  useEffect(()=>{
+    load();
+    forexApi.kronosStatus().then(setKronos).catch(()=>{});
+    const t=setInterval(load,10000);
+    return()=>clearInterval(t);
+  },[]);
+
+  const runTest=async()=>{
+    setTesting(true);setTest(null);
+    try{const r=await forexApi.testConnection();setTest(r);}
+    catch(e){setTest({connected:false,error:e.message});}
+    finally{setTesting(false);}
+  };
 
   if(loading)return(
     <div className="grid-pairs">
@@ -36,14 +51,46 @@ export default function ForexTab(){
   return(
     <div>
       <div className="hero">
-        <div className="hero-title">Forex & Metals <span className="accent">Trading</span></div>
-        <div className="hero-sub">CRT + SMC + Kronos AI · IC Markets via MetaApi</div>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap",position:"relative",zIndex:1}}>
+          <div>
+            <div className="hero-title">Forex & Metals <span className="accent">Trading</span></div>
+            <div className="hero-sub">CRT + SMC + Kronos AI · IC Markets via MetaApi</div>
+          </div>
+          <button className="btn btn-scan btn-sm" onClick={runTest} disabled={testing}>
+            {testing?"Testing…":"⚡ Test Connection"}
+          </button>
+        </div>
         <div className="hero-chips">
           <span className="hero-chip">Kronos <b>{kronos_available?"ACTIVE":"OFFLINE"}</b></span>
           <span className="hero-chip">Pairs <b>{pairs?.length||0}</b></span>
           <span className="hero-chip">Open <b>{positions?.open_count||0}</b></span>
           <span className="hero-chip">Win Rate <b>{positions?.win_rate||0}%</b></span>
         </div>
+
+        {kronos&&kronos.state!=="ready"&&(
+          <div className="info-box info-box-warn" style={{marginTop:12,position:"relative",zIndex:1}}>
+            <b>Kronos {kronos.state}:</b> {kronos.error||"model not loaded"} — biases will stay NEUTRAL until fixed.
+          </div>
+        )}
+
+        {test&&(
+          <div className={`info-box ${test.connected?"info-box-green":"info-box-red"}`} style={{marginTop:12,position:"relative",zIndex:1}}>
+            <div style={{fontWeight:700,marginBottom:6}}>
+              {test.connected?"✓ MetaApi connected":"✕ Connection failed"}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:6,fontFamily:"var(--font-mono)",fontSize:10}}>
+              <span>FOREX_ENABLED: <b>{String(test.forex_enabled)}</b></span>
+              <span>Token set: <b>{String(test.token_set)}</b></span>
+              <span>Account ID set: <b>{String(test.account_id_set)}</b></span>
+              {test.account&&<span>Balance: <b>${test.account.balance?.toFixed(2)}</b></span>}
+              {test.account&&<span>Equity: <b>${test.account.equity?.toFixed(2)}</b></span>}
+              {test.account&&<span>Currency: <b>{test.account.currency}</b></span>}
+              {test.symbols_ok?.length>0&&<span>Symbols OK: <b>{test.symbols_ok.join(", ")}</b></span>}
+              {test.symbols_failed?.length>0&&<span>Symbols failed: <b>{test.symbols_failed.join(", ")}</b></span>}
+            </div>
+            {test.error&&<div style={{marginTop:8,fontSize:11}}>⚠ {test.error}</div>}
+          </div>
+        )}
       </div>
 
       <div className="metric-grid">

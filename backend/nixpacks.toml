@@ -13,9 +13,10 @@ cmds = [
 
 [phases.build]
 cmds = [
-  # Clone Kronos model repo into the backend dir (and repo root as fallback)
+  # Clone Kronos model repo into the backend dir so `from model import ...` works.
+  # The app also auto-clones at runtime if this step is skipped.
   "test -d Kronos || git clone --depth 1 https://github.com/shiyu-coder/Kronos.git Kronos || true",
-  "echo '[build] Kronos repo ready'",
+  "test -d Kronos/model && echo '[build] Kronos repo ready' || echo '[build] WARNING: Kronos clone missing — runtime auto-clone will retry'",
 ]
 
 [start]
