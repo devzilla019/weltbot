@@ -178,6 +178,72 @@ def forex_trades(limit: int = 50) -> List[Dict]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/cascade-stats")
+def cascade_stats() -> Dict:
+    """
+    Performance grouped by the CRT timeframe chain that produced each trade.
+    Lets you see which cascade combos actually win.
+    """
+    try:
+        from database import SessionLocal
+        from models import ForexTrade
+
+        db = SessionLocal()
+        try:
+            trades = db.query(ForexTrade).filter(
+                ForexTrade.outcome.in_(["WIN", "LOSS"])
+            ).all()
+
+            buckets: Dict[str, Dict] = {}
+            for t in trades:
+                key = f"{t.crt_timeframe or '?'}→{t.confirm_timeframe or '?'}→{t.entry_timeframe or '?'}"
+                b = buckets.setdefault(key, {
+                    "chain": key,
+                    "crt_timeframe": t.crt_timeframe,
+                    "confirm_timeframe": t.confirm_timeframe,
+                    "entry_timeframe": t.entry_timeframe,
+                    "trades": 0, "wins": 0, "losses": 0, "pnl": 0.0,
+                })
+                b["trades"] += 1
+                if t.outcome == "WIN":
+                    b["wins"] += 1
+                else:
+                    b["losses"] += 1
+                b["pnl"] += (t.pnl or 0)
+
+            out = []
+            for b in buckets.values():
+                b["win_rate"] = round(b["wins"] / max(b["trades"], 1) * 100, 1)
+                b["pnl"] = round(b["pnl"], 2)
+                out.append(b)
+
+            out.sort(key=lambda x: x["trades"], reverse=True)
+
+            # Also break down by POI type
+            poi_buckets: Dict[str, Dict] = {}
+            for t in trades:
+                k = t.poi or "unknown"
+                p = poi_buckets.setdefault(k, {"poi": k, "trades": 0, "wins": 0, "pnl": 0.0})
+                p["trades"] += 1
+                if t.outcome == "WIN":
+                    p["wins"] += 1
+                p["pnl"] += (t.pnl or 0)
+            poi_out = []
+            for p in poi_buckets.values():
+                p["win_rate"] = round(p["wins"] / max(p["trades"], 1) * 100, 1)
+                p["pnl"] = round(p["pnl"], 2)
+                poi_out.append(p)
+            poi_out.sort(key=lambda x: x["trades"], reverse=True)
+
+            return {"chains": out, "poi": poi_out, "total_closed": len(trades)}
+        finally:
+            db.close()
+
+    except Exception as e:
+        logger.error(f"[forex-api] cascade-stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/update-bias/{symbol}")
 def update_kronos_bias(symbol: str) -> Dict:
     """

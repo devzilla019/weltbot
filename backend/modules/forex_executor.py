@@ -133,6 +133,10 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
                 crt_setup=signal_data.get("crt_setup", "NONE"),
                 pdh=signal_data.get("pdh"),
                 pdl=signal_data.get("pdl"),
+                crt_timeframe=signal_data.get("crt_timeframe"),
+                confirm_timeframe=signal_data.get("confirm_timeframe"),
+                entry_timeframe=signal_data.get("entry_timeframe"),
+                poi=signal_data.get("poi"),
                 metaapi_position_id=result.get("deal_id"),
                 outcome="OPEN",
             )
@@ -140,7 +144,10 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
             db.commit()
             db.refresh(trade)
             logger.info(f"[capital] trade recorded — {signal} {symbol} id={trade.id} "
-                        f"deal={result.get('deal_id')}")
+                        f"deal={result.get('deal_id')} "
+                        f"[{signal_data.get('crt_timeframe')}→"
+                        f"{signal_data.get('confirm_timeframe')}→"
+                        f"{signal_data.get('entry_timeframe')}]")
             result["trade_id"] = trade.id
         except Exception as e:
             logger.error(f"[capital] db record error: {e}")

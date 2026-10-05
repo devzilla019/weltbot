@@ -33,6 +33,12 @@ def run_light_migrations():
     """
     wanted = {
         "crt_levels": [("timeframe", "VARCHAR DEFAULT '1d'")],
+        "forex_trades": [
+            ("crt_timeframe", "VARCHAR"),
+            ("confirm_timeframe", "VARCHAR"),
+            ("entry_timeframe", "VARCHAR"),
+            ("poi", "VARCHAR"),
+        ],
     }
     try:
         insp = inspect(engine)

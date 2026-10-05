@@ -43,4 +43,5 @@ export const forexApi = {
   updateCRT:    (symbol) => req("POST", `/api/forex/update-crt/${symbol}`),
   testConnection: ()     => req("GET",  "/api/forex/test-connection"),
   kronosStatus:   ()     => req("GET",  "/api/forex/kronos-status"),
+  cascadeStats:   ()     => req("GET",  "/api/forex/cascade-stats"),
 };

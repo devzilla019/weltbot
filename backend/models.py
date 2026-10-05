@@ -76,6 +76,11 @@ class ForexTrade(Base):
     crt_setup           = Column(String)
     pdh                 = Column(Float)
     pdl                 = Column(Float)
+    # Cascade tracking — which timeframe chain produced the trade
+    crt_timeframe       = Column(String, nullable=True)   # 1d / 4h / 1h / 15m
+    confirm_timeframe   = Column(String, nullable=True)   # POI timeframe
+    entry_timeframe     = Column(String, nullable=True)   # SMC entry timeframe
+    poi                 = Column(String, nullable=True)   # order_block / breaker_block / fvg / support_resistance
     outcome             = Column(String, default="OPEN")
     pnl                 = Column(Float, nullable=True)
     metaapi_position_id = Column(String, nullable=True)

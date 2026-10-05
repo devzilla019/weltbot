@@ -9,6 +9,7 @@ export default function ForexTab(){
   const[test,setTest]=useState(null);
   const[testing,setTesting]=useState(false);
   const[kronos,setKronos]=useState(null);
+  const[cascade,setCascade]=useState(null);
 
   const load=async()=>{
     try{const d=await forexApi.getStatus();setData(d);setErr(null);}
@@ -18,6 +19,7 @@ export default function ForexTab(){
   useEffect(()=>{
     load();
     forexApi.kronosStatus().then(setKronos).catch(()=>{});
+    forexApi.cascadeStats().then(setCascade).catch(()=>{});
     const t=setInterval(load,30000);
     return()=>clearInterval(t);
   },[]);
@@ -123,6 +125,47 @@ export default function ForexTab(){
           <div className="metric-sub"><span style={{color:"var(--buy)"}}>{positions?.wins||0}W</span> / <span style={{color:"var(--sell)"}}>{positions?.losses||0}L</span></div>
         </div>
       </div>
+
+      {cascade&&cascade.chains?.length>0&&(
+        <>
+          <div className="sec-head">
+            <div className="sec-title">Cascade Performance</div>
+            <div className="sec-sub">{cascade.total_closed} closed trades · by timeframe chain</div>
+          </div>
+          <div className="glass" style={{padding:0,marginBottom:16,overflow:"hidden"}}>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Chain</th><th>POI</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cascade.chains.map(c=>(
+                    <tr key={c.chain}>
+                      <td>
+                        <span style={{fontFamily:"var(--font-mono)",fontSize:11}}>
+                          <span className="chip chip-live" style={{fontSize:8,padding:"1px 6px"}}>{c.crt_timeframe?.toUpperCase()||"?"}</span>
+                          <span style={{color:"var(--text3)",margin:"0 4px"}}>›</span>
+                          <span className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>{c.confirm_timeframe?.toUpperCase()||"?"}</span>
+                          <span style={{color:"var(--text3)",margin:"0 4px"}}>›</span>
+                          <span className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>{c.entry_timeframe?.toUpperCase()||"?"}</span>
+                        </span>
+                      </td>
+                      <td style={{fontFamily:"var(--font-mono)",fontSize:10,color:"var(--text2)"}}>{c.poi||"—"}</td>
+                      <td className="mono">{c.trades}</td>
+                      <td className="mono" style={{color:"var(--buy)"}}>{c.wins}</td>
+                      <td className="mono" style={{color:"var(--sell)"}}>{c.losses}</td>
+                      <td className="mono" style={{color:c.win_rate>=50?"var(--buy)":"var(--sell)"}}>{c.win_rate}%</td>
+                      <td className="mono" style={{color:c.pnl>=0?"var(--buy)":"var(--sell)"}}>{c.pnl>=0?"+":""}${Math.abs(c.pnl).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
 
       {openPos.length>0&&(
         <>
