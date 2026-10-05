@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import engine, Base, SessionLocal
 from models import SignalCache, BotState, Trade
-from routers import signals, trades, analytics, forex
+from routers import signals, trades, analytics, forex, crypto_strategy
 # AUTH DISABLED — re-enable later by importing + including auth.router below
 # from routers import auth
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
@@ -33,6 +33,7 @@ app.include_router(trades.router)
 app.include_router(analytics.router)
 # AUTH DISABLED — app.include_router(auth.router)
 app.include_router(forex.router)
+app.include_router(crypto_strategy.router)
 
 _last_scan_log  = []
 _active_setups: dict = {}
@@ -645,25 +646,48 @@ def bot_status():
     db.close()
     balance = safe_get_balance()
     
-    from config import FOREX_ENABLED
+    from config import FOREX_ENABLED, KRONOS_ENABLED
     forex_info = {}
     if FOREX_ENABLED:
         from modules.kronos_engine import is_kronos_available
+        forex_balance = 0.0
+        forex_equity  = 0.0
+        try:
+            from modules.market_data_forex import get_account_info
+            acct = get_account_info()
+            if acct:
+                forex_balance = acct.get("balance", 0.0)
+                forex_equity  = acct.get("equity", 0.0)
+        except Exception as e:
+            print(f"[bot] forex balance error: {e}")
         forex_info = {
             "forex_enabled": True,
             "kronos_available": is_kronos_available(),
-            "forex_active_setups": list(_forex_active_setups.keys())
+            "forex_active_setups": list(_forex_active_setups.keys()),
+            "forex_balance": round(forex_balance, 2),
+            "forex_equity":  round(forex_equity, 2),
         }
-    
+    else:
+        forex_info = {"forex_enabled": False, "forex_balance": 0.0, "forex_equity": 0.0}
+
+    # Crypto strategy state
+    crypto_info = {"kronos_enabled": KRONOS_ENABLED, "crypto_active_setups": []}
+    try:
+        from modules.crypto_strategy import get_crypto_setups
+        crypto_info["crypto_active_setups"] = list(get_crypto_setups().keys())
+    except Exception:
+        pass
+
     return {
         "running":       is_run,
         "paused":        paused,
         "pause_reason":  reason,
-        "balance_usdt":  round(balance, 2),
+        "balance_usdt":  round(balance, 2),   # crypto / Binance
         "testnet":       BINANCE_TESTNET,
         "last_scan":     _last_scan_log,
         "active_setups": list(_active_setups.keys()),
-        **forex_info
+        **forex_info,
+        **crypto_info
     }
 
 

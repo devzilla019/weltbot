@@ -1,193 +1,123 @@
-import { useState, useEffect } from 'react';
-import CRTSignalCard from './CRTSignalCard';
-import { forexApi } from '../api';
-import '../index.css';
+import{useState,useEffect}from"react";
+import CRTSignalCard from"./CRTSignalCard";
+import{forexApi}from"../api";
 
-function ForexTab() {
-  const [forexData, setForexData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+export default function ForexTab(){
+  const[data,setData]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[err,setErr]=useState(null);
 
-  useEffect(() => {
-    fetchForexData();
-    const interval = setInterval(fetchForexData, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchForexData = async () => {
-    try {
-      const data = await forexApi.getStatus();
-      setForexData(data);
-      setError(null);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+  const load=async()=>{
+    try{const d=await forexApi.getStatus();setData(d);setErr(null);}
+    catch(e){setErr(e.message);}
+    finally{setLoading(false);}
   };
+  useEffect(()=>{load();const t=setInterval(load,10000);return()=>clearInterval(t);},[]);
 
-  if (loading) {
-    return (
-      <div className="flex justify-center items-center h-64">
-        <div className="text-gray-400">Loading forex data...</div>
-      </div>
-    );
-  }
+  if(loading)return(
+    <div className="grid-pairs">
+      {[...Array(8)].map((_,i)=><div key={i} className="skeleton" style={{height:210}}/>)}
+    </div>
+  );
 
-  if (error) {
-    return (
-      <div className="bg-red-900/20 border border-red-500 rounded-lg p-4">
-        <p className="text-red-400">Error: {error}</p>
-      </div>
-    );
-  }
+  if(err)return<div className="info-box info-box-red">⚠ {err}</div>;
 
-  if (!forexData || !forexData.enabled) {
-    return (
-      <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-8 text-center">
-        <h3 className="text-xl text-gray-400 mb-2">Forex Trading Disabled</h3>
-        <p className="text-gray-500">Set FOREX_ENABLED=true to activate forex trading</p>
-      </div>
-    );
-  }
+  if(!data||!data.enabled)return(
+    <div className="glass" style={{padding:40,textAlign:"center"}}>
+      <div style={{fontSize:40,marginBottom:12}}>◆</div>
+      <div className="sec-title" style={{justifyContent:"center"}}>Forex Trading Disabled</div>
+      <div className="sec-sub" style={{marginTop:8}}>Set FOREX_ENABLED=true and add METAAPI_TOKEN + METAAPI_ACCOUNT_ID on Railway</div>
+    </div>
+  );
 
-  const { biases, crt_levels, positions, kronos_available } = forexData;
+  const{biases,crt_levels,positions,account,kronos_available,pairs}=data;
+  const openPos=positions?.open_positions||[];
 
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-gradient-to-r from-blue-900/30 to-purple-900/30 border border-blue-800/50 rounded-lg p-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-2xl font-bold text-white mb-1">Forex & Metals Trading</h2>
-            <p className="text-gray-400">CRT + SMC + Kronos AI Strategy</p>
-          </div>
-          <div className="text-right">
-            <div className={`text-sm font-semibold ${
-              kronos_available ? 'text-green-400' : 'text-red-400'
-            }`}>
-              Kronos AI: {kronos_available ? 'ACTIVE' : 'OFFLINE'}
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              3-Layer System: Bias → CRT → SMC
-            </div>
-          </div>
+  return(
+    <div>
+      <div className="hero">
+        <div className="hero-title">Forex & Metals <span className="accent">Trading</span></div>
+        <div className="hero-sub">CRT + SMC + Kronos AI · IC Markets via MetaApi</div>
+        <div className="hero-chips">
+          <span className="hero-chip">Kronos <b>{kronos_available?"ACTIVE":"OFFLINE"}</b></span>
+          <span className="hero-chip">Pairs <b>{pairs?.length||0}</b></span>
+          <span className="hero-chip">Open <b>{positions?.open_count||0}</b></span>
+          <span className="hero-chip">Win Rate <b>{positions?.win_rate||0}%</b></span>
         </div>
       </div>
 
-      {/* Position Summary */}
-      {positions && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
-            <div className="text-gray-400 text-sm mb-1">Open Positions</div>
-            <div className="text-2xl font-bold text-white">{positions.open_count}</div>
+      <div className="metric-grid">
+        <div className="metric">
+          <div className="metric-label"><span style={{color:"var(--lav)"}}>◆</span> MT5 Balance</div>
+          <div className="metric-value" style={{color:"var(--lav-2)"}}>
+            ${(account?.balance||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
           </div>
-          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
-            <div className="text-gray-400 text-sm mb-1">Total P&L</div>
-            <div className={`text-2xl font-bold ${
-              positions.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'
-            }`}>
-              ${positions.total_pnl?.toFixed(2)}
-            </div>
-          </div>
-          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
-            <div className="text-gray-400 text-sm mb-1">Win Rate</div>
-            <div className="text-2xl font-bold text-blue-400">{positions.win_rate}%</div>
-          </div>
-          <div className="bg-gray-800/50 border border-gray-700 rounded-lg p-4">
-            <div className="text-gray-400 text-sm mb-1">Closed Trades</div>
-            <div className="text-2xl font-bold text-white">
-              <span className="text-green-400">{positions.wins}</span>
-              <span className="text-gray-500 mx-1">/</span>
-              <span className="text-red-400">{positions.losses}</span>
-            </div>
-          </div>
+          <div className="metric-sub">{account?.currency||"USD"} · IC Markets demo</div>
         </div>
+        <div className="metric">
+          <div className="metric-label">Equity</div>
+          <div className="metric-value" style={{color:"var(--text)"}}>
+            ${(account?.equity||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
+          </div>
+          <div className="metric-sub">free margin ${(account?.free_margin||0).toFixed(2)}</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Total P&L</div>
+          <div className="metric-value" style={{color:(positions?.total_pnl||0)>=0?"var(--buy)":"var(--sell)"}}>
+            {(positions?.total_pnl||0)>=0?"+":""}${(positions?.total_pnl||0).toFixed(2)}
+          </div>
+          <div className="metric-sub">{positions?.closed_trades||0} closed trades</div>
+        </div>
+        <div className="metric">
+          <div className="metric-label">Win Rate</div>
+          <div className="metric-value" style={{color:"var(--info)"}}>{positions?.win_rate||0}%</div>
+          <div className="metric-sub"><span style={{color:"var(--buy)"}}>{positions?.wins||0}W</span> / <span style={{color:"var(--sell)"}}>{positions?.losses||0}L</span></div>
+        </div>
+      </div>
+
+      {openPos.length>0&&(
+        <>
+          <div className="sec-head"><div className="sec-title">Open Positions</div><div className="sec-sub">{openPos.length} live</div></div>
+          <div className="grid-pairs" style={{marginBottom:8}}>
+            {openPos.map(p=>(
+              <div key={p.id} className={`pair-card ${p.signal==="BUY"?"buy":"sell"}`}>
+                <div className="pair-head">
+                  <div className="pair-symbol">{p.symbol}</div>
+                  <span className={`chip ${p.signal==="BUY"?"chip-bull":"chip-bear"}`}><span className="chip-dot pulse"/>{p.signal}</span>
+                </div>
+                <div className="pair-price-label">Live P&L</div>
+                <div className="pair-price" style={{color:p.pnl>=0?"var(--buy)":"var(--sell)"}}>
+                  {p.pnl>=0?"+":""}${p.pnl?.toFixed(2)}
+                </div>
+                <div className="range-labels" style={{marginTop:10}}>
+                  <span>Entry {p.entry?.toFixed(5)}</span>
+                  <span>Now {p.current?.toFixed(5)}</span>
+                </div>
+                <div className="range-labels" style={{marginTop:4}}>
+                  <span style={{color:"var(--sell)"}}>SL {p.sl?.toFixed(5)}</span>
+                  <span style={{color:"var(--buy)"}}>TP {p.tp?.toFixed(5)}</span>
+                </div>
+                <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
+                  <span className="chip chip-live">{p.lots} lots</span>
+                  <span className="chip chip-neutral">{p.confidence}%</span>
+                  <span className="chip chip-neutral">{p.kronos_bias}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
-      {/* Open Positions */}
-      {positions?.open_positions?.length > 0 && (
-        <div className="space-y-3">
-          <h3 className="text-lg font-semibold text-white">Open Positions</h3>
-          {positions.open_positions.map((pos) => (
-            <div
-              key={pos.id}
-              className="bg-gray-800/80 border border-gray-700 rounded-lg p-4"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-4">
-                  <div className={`px-3 py-1 rounded text-sm font-bold ${
-                    pos.signal === 'BUY'
-                      ? 'bg-green-500/20 text-green-400'
-                      : 'bg-red-500/20 text-red-400'
-                  }`}>
-                    {pos.signal}
-                  </div>
-                  <div>
-                    <div className="text-white font-semibold text-lg">{pos.symbol}</div>
-                    <div className="text-gray-400 text-sm">
-                      {pos.lots} lots • {pos.confidence}% conf
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <div className={`text-xl font-bold ${
-                    pos.pnl >= 0 ? 'text-green-400' : 'text-red-400'
-                  }`}>
-                    ${pos.pnl?.toFixed(2)}
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    Entry: {pos.entry?.toFixed(5)}
-                  </div>
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-3 gap-4 text-sm">
-                <div>
-                  <span className="text-gray-500">Current:</span>
-                  <span className="text-white ml-2">{pos.current?.toFixed(5)}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">SL:</span>
-                  <span className="text-red-400 ml-2">{pos.sl?.toFixed(5)}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">TP:</span>
-                  <span className="text-green-400 ml-2">{pos.tp?.toFixed(5)}</span>
-                </div>
-              </div>
-              <div className="mt-2 flex items-center space-x-2 text-xs">
-                <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded">
-                  {pos.kronos_bias}
-                </span>
-                <span className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">
-                  CRT: {pos.crt_setup}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="sec-head">
+        <div className="sec-title">Market Signals</div>
+        <div className="sec-sub">{pairs?.length||0} pairs · PDH/PDL + Kronos bias</div>
+      </div>
 
-      {/* Pair Signals */}
-      <div>
-        <h3 className="text-lg font-semibold text-white mb-3">Market Signals</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {forexData.pairs?.map((symbol) => {
-            const bias = biases?.[symbol];
-            const levels = crt_levels?.[symbol];
-            return (
-              <CRTSignalCard
-                key={symbol}
-                symbol={symbol}
-                bias={bias}
-                levels={levels}
-              />
-            );
-          })}
-        </div>
+      <div className="grid-pairs">
+        {pairs?.map(sym=>(
+          <CRTSignalCard key={sym} symbol={sym} bias={biases?.[sym]} levels={crt_levels?.[sym]}/>
+        ))}
       </div>
     </div>
   );
 }
-
-export default ForexTab;

@@ -1,14 +1,13 @@
 import{useState,useEffect,useCallback}from"react";
 import{useApp}from"../context/AppContext";
 import{makeApi}from"../api";
-import Navbar from"../components/Navbar";
+import Sidebar from"../components/Sidebar";
 import DisclaimerBanner from"../components/DisclaimerBanner";
 import OverviewTab from"../components/OverviewTab";
 import SignalsTab from"../components/SignalsTab";
 import TradesTab from"../components/TradesTab";
 import ForexTab from"../components/ForexTab";
-// SETTINGS REMOVED — no API-key / settings UI. Re-enable later if needed.
-// import SettingsModal from"../components/SettingsModal";
+import CryptoStrategyTab from"../components/CryptoStrategyTab";
 import BuiltBy from"../components/BuiltBy";
 export default function Dashboard(){
   const{token,showToast}=useApp();
@@ -23,6 +22,7 @@ export default function Dashboard(){
   const[actionLoad,setActionLoad]=useState(false);
   const[lastUpdate,setLastUpdate]=useState(null);
   const[backendDown,setBackendDown]=useState(false);
+  const[sidebarOpen,setSidebarOpen]=useState(false);
   const load=useCallback(async(silent=false)=>{
     if(!silent)setLoading(true);
     try{
@@ -52,18 +52,42 @@ export default function Dashboard(){
     }catch{showToast("Close all failed","error");}
   };
   const ctx={botStatus,signals,trades,summary,portfolio,loading,actionLoad,lastUpdate,backendDown,handleStart,handleStop,handleScan,handleCloseTrade,handleClearTrades,handleCloseAll,refresh:load};
+  const TITLES={overview:["Dashboard","Portfolio overview & live signals"],signals:["Signals","Structure signals across all markets"],trades:["Trades","Full trade history & performance"],forex:["Forex & Metals","CRT + SMC + Kronos AI · MT5"],crypto:["Crypto","Kronos + CRT + SMC · Binance futures"]};
+  const[title,subtitle]=TITLES[tab]||TITLES.overview;
+  const isLive=botStatus?.running&&!botStatus?.paused;
   return(
-    <div className="app-root">
-      <DisclaimerBanner/>
-      <Navbar tab={tab} setTab={setTab} botStatus={botStatus} ctx={ctx}/>
-      {backendDown&&<div style={{background:"rgba(255,77,109,0.08)",border:"1px solid rgba(255,77,109,0.2)",padding:"10px 24px",fontSize:11,color:"var(--sell)",fontFamily:"var(--font-mono)",display:"flex",alignItems:"center",gap:8}}>⚠ Backend unreachable — check Railway<button onClick={()=>load()} style={{marginLeft:"auto",fontSize:10,padding:"3px 10px",background:"rgba(255,77,109,0.1)",border:"1px solid rgba(255,77,109,0.3)",color:"var(--sell)",borderRadius:4,cursor:"pointer"}}>Retry</button></div>}
-      <div className="page-body animate-in">
-        {tab==="overview"&&<OverviewTab {...ctx}/>}
-        {tab==="signals"&&<SignalsTab {...ctx}/>}
-        {tab==="trades"&&<TradesTab {...ctx}/>}
-        {tab==="forex"&&<ForexTab/>}
+    <div className="app-shell">
+      <div className="orb orb-1"/><div className="orb orb-2"/>
+      <Sidebar tab={tab} setTab={setTab} botStatus={botStatus} open={sidebarOpen} onClose={()=>setSidebarOpen(false)}/>
+      <div className="app-main">
+        <DisclaimerBanner/>
+        <div className="topbar">
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <button className="icon-btn sidebar-toggle" onClick={()=>setSidebarOpen(o=>!o)} title="Menu">☰</button>
+            <div>
+              <div className="topbar-title">{title}</div>
+              <div className="topbar-sub">{subtitle}</div>
+            </div>
+          </div>
+          <div className="topbar-right">
+            {lastUpdate&&<span style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>{lastUpdate}</span>}
+            {!isLive
+              ?<button className="btn btn-success btn-sm" onClick={handleStart} disabled={actionLoad}>{actionLoad?"…":"▶ Start"}</button>
+              :<button className="btn btn-danger btn-sm" onClick={handleStop} disabled={actionLoad}>{actionLoad?"…":"■ Stop"}</button>}
+            <button className="btn btn-scan btn-sm" onClick={handleScan} disabled={actionLoad}>⟳ Scan</button>
+            <button className="btn btn-danger btn-sm" onClick={handleCloseAll} title="Close all exchange positions">✕ Close All</button>
+          </div>
+        </div>
+        {backendDown&&<div style={{background:"rgba(255,92,138,0.08)",border:"1px solid rgba(255,92,138,0.2)",padding:"10px 24px",fontSize:11,color:"var(--sell)",fontFamily:"var(--font-mono)",display:"flex",alignItems:"center",gap:8}}>⚠ Backend unreachable — check Railway<button onClick={()=>load()} style={{marginLeft:"auto",fontSize:10,padding:"3px 10px",background:"rgba(255,92,138,0.1)",border:"1px solid rgba(255,92,138,0.3)",color:"var(--sell)",borderRadius:4,cursor:"pointer"}}>Retry</button></div>}
+        <div className="page-body animate-in" key={tab}>
+          {tab==="overview"&&<OverviewTab {...ctx}/>}
+          {tab==="signals"&&<SignalsTab {...ctx}/>}
+          {tab==="trades"&&<TradesTab {...ctx}/>}
+          {tab==="forex"&&<ForexTab/>}
+          {tab==="crypto"&&<CryptoStrategyTab/>}
+        </div>
+        <BuiltBy/>
       </div>
-      <BuiltBy/>
     </div>
   );
 }

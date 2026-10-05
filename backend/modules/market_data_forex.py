@@ -146,6 +146,42 @@ def get_current_price(symbol: str) -> Optional[float]:
     return loop.run_until_complete(_get_current_price_async(symbol))
 
 
+async def _get_account_info_async() -> Optional[Dict]:
+    """Get MT5 account information (balance, equity, margin)."""
+    try:
+        conn, _ = await _get_metaapi_connection()
+        if conn is None:
+            return None
+
+        info = conn.terminal_state.account_information
+        if not info:
+            return None
+
+        return {
+            'balance':  float(info.get('balance', 0) or 0),
+            'equity':   float(info.get('equity', 0) or 0),
+            'margin':   float(info.get('margin', 0) or 0),
+            'free_margin': float(info.get('freeMargin', 0) or 0),
+            'currency': info.get('currency', 'USD'),
+            'leverage': info.get('leverage', 0),
+            'profit':   float(info.get('profit', 0) or 0),
+        }
+    except Exception as e:
+        logger.error(f"[metaapi] account info error: {e}")
+        return None
+
+
+def get_account_info() -> Optional[Dict]:
+    """Sync wrapper for MT5 account info."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    return loop.run_until_complete(_get_account_info_async())
+
+
 async def _get_positions_async() -> List[Dict]:
     """Get all open positions"""
     try:

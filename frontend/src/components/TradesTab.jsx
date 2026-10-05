@@ -24,13 +24,22 @@ export default function TradesTab({trades,handleCloseTrade,handleClearTrades}){
   const avgLoss=losses>0?Math.abs(closed.filter(t=>t.outcome==="LOSS").reduce((s,t)=>s+(t.pnl||0),0)/losses):0;
   return(
     <div>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:10}}>
-        <div><div style={{fontFamily:"var(--font-display)",fontSize:20,fontWeight:700}}>Trade History</div><div style={{fontSize:12,color:"var(--text2)",marginTop:2}}>{trades.length} total · {openCnt} open · {wins}W {losses}L</div></div>
-        {trades.length>0&&<button onClick={onClear} disabled={clearing} style={{padding:"7px 14px",borderRadius:6,fontSize:11,border:"1px solid",cursor:"pointer",fontFamily:"var(--font-mono)",background:confirmClear?"rgba(255,77,109,0.15)":"var(--surface2)",color:confirmClear?"var(--sell)":"var(--text3)",borderColor:confirmClear?"rgba(255,77,109,0.35)":"var(--border)",transition:"all 0.2s"}}>{clearing?"Clearing…":confirmClear?"⚠ Confirm Clear":"Clear History"}</button>}
+      <div className="hero">
+        <div className="hero-title">Trade <span className="accent">History</span></div>
+        <div className="hero-sub">{trades.length} total · {openCnt} open · {wins}W {losses}L</div>
+        <div className="hero-chips">
+          <span className="hero-chip">Win Rate <b>{wr}%</b></span>
+          <span className="hero-chip">Total P&L <b>{totalPnl>=0?"+":""}${Math.abs(totalPnl).toFixed(2)}</b></span>
+          <span className="hero-chip">Avg Win <b>+${avgWin.toFixed(2)}</b></span>
+          <span className="hero-chip">Avg Loss <b>-${avgLoss.toFixed(2)}</b></span>
+        </div>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:8,marginBottom:16}}>
-        {[{label:"Total",value:trades.length,color:"var(--text)"},{label:"Open",value:openCnt,color:"var(--info)"},{label:"Wins",value:wins,color:"var(--buy)"},{label:"Losses",value:losses,color:"var(--sell)"},{label:"Win Rate",value:`${wr}%`,color:parseFloat(wr)>=50?"var(--buy)":"var(--sell)"},{label:"Total P&L",value:`${totalPnl>=0?"+":""}$${Math.abs(totalPnl).toFixed(4)}`,color:totalPnl>=0?"var(--buy)":"var(--sell)"},{label:"Avg Win",value:avgWin>0?`+$${avgWin.toFixed(4)}`:"—",color:"var(--buy)"},{label:"Avg Loss",value:avgLoss>0?`-$${avgLoss.toFixed(4)}`:"—",color:"var(--sell)"}].map(s=>(
-          <div key={s.label} className="stat-card"><div className="stat-label">{s.label}</div><div className="stat-value" style={{color:s.color,fontSize:14}}>{s.value}</div></div>
+      {trades.length>0&&<div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <button onClick={onClear} disabled={clearing} style={{padding:"7px 14px",borderRadius:8,fontSize:11,border:"1px solid",cursor:"pointer",fontFamily:"var(--font-mono)",background:confirmClear?"rgba(255,92,138,0.15)":"var(--surface2)",color:confirmClear?"var(--sell)":"var(--text3)",borderColor:confirmClear?"rgba(255,92,138,0.35)":"var(--border)",transition:"all 0.2s"}}>{clearing?"Clearing…":confirmClear?"⚠ Confirm Clear":"Clear History"}</button>
+      </div>}
+      <div className="metric-grid">
+        {[{label:"Total",value:trades.length,color:"var(--text)"},{label:"Open",value:openCnt,color:"var(--info)"},{label:"Wins",value:wins,color:"var(--buy)"},{label:"Losses",value:losses,color:"var(--sell)"},{label:"Win Rate",value:`${wr}%`,color:parseFloat(wr)>=50?"var(--buy)":"var(--sell)"},{label:"Total P&L",value:`${totalPnl>=0?"+":""}$${Math.abs(totalPnl).toFixed(2)}`,color:totalPnl>=0?"var(--buy)":"var(--sell)"}].map(s=>(
+          <div key={s.label} className="metric"><div className="metric-label">{s.label}</div><div className="metric-value" style={{color:s.color,fontSize:20}}>{s.value}</div></div>
         ))}
       </div>
       <div style={{display:"flex",gap:6,marginBottom:12,alignItems:"center",flexWrap:"wrap"}}>
@@ -41,7 +50,7 @@ export default function TradesTab({trades,handleCloseTrade,handleClearTrades}){
         </div>
         <input placeholder="Search asset…" value={search} onChange={e=>setSearch(e.target.value)} style={{padding:"5px 12px",borderRadius:5,fontSize:11,background:"var(--surface2)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"var(--font-mono)",outline:"none",width:140}}/>
       </div>
-      <div className="card" style={{padding:0}}>
+      <div className="glass" style={{padding:0}}>
         {filtered.length===0?<div className="empty-state"><div className="empty-icon">{trades.length===0?"📋":"🔍"}</div>{trades.length===0?"No trades yet — start the bot":"No trades match the filter"}</div>:(
           <div className="table-wrap">
             <table className="data-table">

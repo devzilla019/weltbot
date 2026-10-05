@@ -2,6 +2,7 @@ import{useState,useEffect}from"react";
 // AUTH DISABLED — re-enable later by uncommenting the import + the AuthPage branch below
 // import AuthPage from"./pages/AuthPage";
 import Dashboard from"./pages/Dashboard";
+import LoadingScreen from"./components/LoadingScreen";
 import{AppCtx}from"./context/AppContext";
 
 export default function App(){
@@ -11,6 +12,7 @@ export default function App(){
   const[token,setToken]=useState(null);
   const[theme,setTheme]=useState(()=>localStorage.getItem("wb_theme")||"dark");
   const[toast,setToast]=useState(null);
+  const[booting,setBooting]=useState(true);
 
   useEffect(()=>{
     document.documentElement.setAttribute("data-theme",theme);
@@ -29,6 +31,7 @@ export default function App(){
   return(
     <AppCtx.Provider value={{user,setUser,token,setSession,clearSession,theme,setTheme,showToast,logout}}>
       <div className="app-root">
+        {booting&&<LoadingScreen onDone={()=>setBooting(false)}/>}
         {/* AUTH DISABLED — always show dashboard. Re-enable with:
             {!user||!token?<AuthPage/>:<Dashboard/>} */}
         <Dashboard/>

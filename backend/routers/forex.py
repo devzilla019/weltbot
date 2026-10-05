@@ -31,18 +31,44 @@ def forex_status() -> Dict:
         levels = get_cached_levels()
         position_summary = get_forex_position_summary()
         
+        # MT5 account balance (separate from crypto)
+        account = None
+        try:
+            from modules.market_data_forex import get_account_info
+            account = get_account_info()
+        except Exception as e:
+            logger.warning(f"[forex-api] account info unavailable: {e}")
+        
         return {
             'enabled': True,
             'kronos_available': is_kronos_available(),
             'pairs': FOREX_PAIRS,
             'biases': biases,
             'crt_levels': levels,
-            'positions': position_summary
+            'positions': position_summary,
+            'account': account
         }
         
     except Exception as e:
         logger.error(f"[forex-api] status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/balance")
+def forex_balance() -> Dict:
+    """Get MT5 account balance/equity (separate from crypto balance)."""
+    try:
+        from config import FOREX_ENABLED
+        if not FOREX_ENABLED:
+            return {'enabled': False, 'balance': 0.0, 'equity': 0.0}
+        from modules.market_data_forex import get_account_info
+        info = get_account_info()
+        if not info:
+            return {'enabled': True, 'balance': 0.0, 'equity': 0.0, 'connected': False}
+        return {'enabled': True, 'connected': True, **info}
+    except Exception as e:
+        logger.error(f"[forex-api] balance error: {e}")
+        return {'enabled': True, 'connected': False, 'balance': 0.0, 'equity': 0.0}
 
 
 @router.get("/signals")
