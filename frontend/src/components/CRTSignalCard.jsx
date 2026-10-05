@@ -20,8 +20,9 @@ export default function CRTSignalCard({symbol,bias,levels}){
   const cls=biasVal==="BULLISH"?"buy":biasVal==="BEARISH"?"sell":"";
   const chip=biasVal==="BULLISH"?"chip-bull":biasVal==="BEARISH"?"chip-bear":"chip-neutral";
   const inTrade=!!details?.open_trade;
-  const crtChip=inTrade?"chip-live":"chip-wait";
-  const crtText=inTrade?"IN TRADE":"WAITING";
+  const setup=details?.active_setup;
+  const crtChip=inTrade?"chip-live":setup?"chip-bull":"chip-wait";
+  const crtText=inTrade?"IN TRADE":setup?"SETUP ACTIVE":"WAITING";
 
   const fmt=v=>v==null?"—":Number(v).toFixed(5);
   const hi=levels?.range_high??levels?.pdh;
@@ -70,6 +71,26 @@ export default function CRTSignalCard({symbol,bias,levels}){
         <span className="pipeline-arrow">›</span>
         <div className={`pipeline-step ${inTrade?"on":""}`}>SMC</div>
       </div>
+
+      {setup&&(
+        <div style={{marginTop:10,padding:"8px 10px",borderRadius:8,background:"rgba(167,139,250,0.08)",border:"1px solid var(--border2)"}}>
+          <div style={{fontFamily:"var(--font-mono)",fontSize:9,color:"var(--lav-2)",letterSpacing:"0.06em",marginBottom:4}}>
+            CASCADE · {setup.direction}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-mono)",fontSize:9,flexWrap:"wrap"}}>
+            <span className="chip chip-live" style={{fontSize:8,padding:"1px 6px"}}>CRT {setup.timeframe?.toUpperCase()}</span>
+            <span style={{color:"var(--text3)"}}>›</span>
+            <span className={`chip ${setup.poi?"chip-bull":"chip-wait"}`} style={{fontSize:8,padding:"1px 6px"}}>
+              {setup.confirm_timeframe?.toUpperCase()||"?"} {setup.poi?`✓ ${setup.poi}`:"…"}
+            </span>
+            <span style={{color:"var(--text3)"}}>›</span>
+            <span className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>ENTRY {setup.entry_timeframe?.toUpperCase()||"?"}</span>
+          </div>
+          <div style={{fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",marginTop:4}}>
+            {setup.sweep_type} swept · target {setup.target!=null?Number(setup.target).toFixed(5):"—"}
+          </div>
+        </div>
+      )}
 
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:12}}>
         <span className={`chip ${crtChip}`}><span className={`chip-dot ${inTrade?"pulse":""}`}/>{crtText}</span>

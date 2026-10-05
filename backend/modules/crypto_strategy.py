@@ -192,31 +192,42 @@ def clear_crypto_setup(symbol: str):
 
 def check_crypto_entry(symbol: str) -> Optional[dict]:
     """
-    For an active CRT setup, look for an SMC entry on 5m:
-    order block + FVG (+ optional liquidity grab).
+    Cascade: CRT timeframe -> confirm POI on mid TF -> SMC entry on lower TF.
     Returns a signal dict compatible with the crypto executor.
     """
     try:
-        from modules.market_data import fetch_ohlcv, get_ticker_price
-        from modules.forex_signal_engine import check_entry_condition
+        from modules.market_data import get_ticker_price
+        from modules.forex_signal_engine import check_entry_condition, confirm_on_timeframe
+        from modules.crt_detector import get_cascade
 
         setup = _crypto_setups.get(symbol)
         if not setup:
             return None
 
+        crt_tf = setup.get("timeframe", "1d")
+        cascade = get_cascade(crt_tf)
+        confirm_tf = cascade["confirm"]
+        entry_tf = cascade["entry"]
+
+        # ── STEP 2: confirm a POI on the mid timeframe ────────────────────────
+        poi = _crypto_confirm(symbol, setup, confirm_tf)
+        if not poi:
+            return None
+
+        setup["confirm_timeframe"] = confirm_tf
+        setup["entry_timeframe"] = entry_tf
+        setup["poi"] = poi
+
+        # ── STEP 3: SMC entry on the lower timeframe ──────────────────────────
         price = get_ticker_price(symbol)
         if price <= 0:
             return None
 
-        df5 = fetch_ohlcv(symbol, interval="5m", limit=60)
-        if df5 is None or len(df5) < 20:
+        df_entry = _crypto_candles(symbol, entry_tf, 60)
+        if df_entry is None or len(df_entry) < 20:
             return None
 
-        df5r = df5.reset_index()
-        if "timestamp" not in df5r.columns:
-            df5r = df5r.rename(columns={df5r.columns[0]: "timestamp"})
-
-        signal = check_entry_condition(setup, price, df5r)
+        signal = check_entry_condition(setup, price, df_entry)
         if not signal:
             return None
 
@@ -230,6 +241,27 @@ def check_crypto_entry(symbol: str) -> Optional[dict]:
         return signal
     except Exception as e:
         logger.error(f"[crypto-smc] {symbol} entry error: {e}")
+        return None
+
+
+def _crypto_confirm(symbol: str, setup: dict, confirm_tf: str):
+    """Find a POI on the confirmation timeframe for a crypto symbol."""
+    try:
+        from modules.forex_signal_engine import find_poi, calculate_atr
+
+        df = _crypto_candles(symbol, confirm_tf, 60)
+        if df is None or len(df) < 20:
+            return None
+
+        price = float(df["close"].iloc[-1])
+        atr = calculate_atr(df)
+        poi = find_poi(df, setup["direction"], price, atr)
+        if poi:
+            logger.info(f"[crypto-cascade] {symbol} POI on {confirm_tf}: {poi['kind']} "
+                        f"(CRT {setup.get('timeframe')})")
+        return poi
+    except Exception as e:
+        logger.error(f"[crypto-cascade] {symbol} confirm error: {e}")
         return None
 
 

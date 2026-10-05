@@ -154,6 +154,138 @@ def detect_liquidity_grab(df: pd.DataFrame, direction: str) -> bool:
         return False
 
 
+def detect_breaker_block(df: pd.DataFrame, direction: str) -> Optional[Dict]:
+    """
+    Detect a Breaker Block — a failed order block that price broke through
+    and now acts as support/resistance in the opposite direction.
+
+    BUY  breaker: a bearish OB that price broke ABOVE, now retested as support
+    SELL breaker: a bullish OB that price broke BELOW, now retested as resistance
+    """
+    try:
+        if len(df) < 15:
+            return None
+
+        recent = df.tail(25)
+
+        if direction == 'BUY':
+            for i in range(len(recent) - 6, 0, -1):
+                c = recent.iloc[i]
+                after = recent.iloc[i + 1:]
+                if c['close'] < c['open']:                       # bearish candle
+                    broke_above = (after['close'] > c['high']).any()
+                    if broke_above:
+                        return {
+                            'bb_high': float(c['high']),
+                            'bb_low': float(c['low']),
+                            'bb_index': i,
+                            'type': 'bullish_breaker',
+                        }
+        else:
+            for i in range(len(recent) - 6, 0, -1):
+                c = recent.iloc[i]
+                after = recent.iloc[i + 1:]
+                if c['close'] > c['open']:                       # bullish candle
+                    broke_below = (after['close'] < c['low']).any()
+                    if broke_below:
+                        return {
+                            'bb_high': float(c['high']),
+                            'bb_low': float(c['low']),
+                            'bb_index': i,
+                            'type': 'bearish_breaker',
+                        }
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[smc] breaker block detection error: {e}")
+        return None
+
+
+def detect_support_resistance(df: pd.DataFrame, direction: str) -> Optional[Dict]:
+    """
+    Detect a key support/resistance level from recent swing highs/lows.
+    BUY  -> nearest swing LOW below price (support)
+    SELL -> nearest swing HIGH above price (resistance)
+    """
+    try:
+        if len(df) < 20:
+            return None
+
+        recent = df.tail(40)
+        highs = recent['high'].values
+        lows = recent['low'].values
+        price = float(recent['close'].iloc[-1])
+
+        # Simple swing detection (3-bar pivot)
+        swing_highs, swing_lows = [], []
+        for i in range(2, len(recent) - 2):
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                swing_highs.append(float(highs[i]))
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                swing_lows.append(float(lows[i]))
+
+        if direction == 'BUY':
+            below = [l for l in swing_lows if l < price]
+            if below:
+                level = max(below)          # nearest support
+                return {'sr_level': level, 'type': 'support'}
+        else:
+            above = [h for h in swing_highs if h > price]
+            if above:
+                level = min(above)          # nearest resistance
+                return {'sr_level': level, 'type': 'resistance'}
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[smc] support/resistance detection error: {e}")
+        return None
+
+
+def find_poi(df: pd.DataFrame, direction: str, current_price: float,
+             atr: float) -> Optional[Dict]:
+    """
+    Find a Point of Interest on the CONFIRMATION timeframe that price is
+    respecting: order block, breaker block, FVG, or support/resistance.
+
+    Returns the strongest POI found (OB > breaker > FVG > S/R), or None.
+    """
+    try:
+        tolerance = max(atr * 0.5, current_price * 0.0002)
+
+        # 1) Order block
+        ob = detect_order_block(df, direction)
+        if ob and (ob['ob_low'] - tolerance) <= current_price <= (ob['ob_high'] + tolerance):
+            return {'kind': 'order_block', **ob}
+
+        # 2) Breaker block
+        bb = detect_breaker_block(df, direction)
+        if bb and (bb['bb_low'] - tolerance) <= current_price <= (bb['bb_high'] + tolerance):
+            return {'kind': 'breaker_block', **bb}
+
+        # 3) Fair value gap
+        fvg = detect_fvg(df, direction)
+        if fvg:
+            dist = min(abs(current_price - fvg['fvg_high']),
+                       abs(current_price - fvg['fvg_low']))
+            if dist <= tolerance:
+                return {'kind': 'fvg', **fvg}
+
+        # 4) Support / resistance
+        sr = detect_support_resistance(df, direction)
+        if sr and abs(current_price - sr['sr_level']) <= tolerance:
+            return {'kind': 'support_resistance', **sr}
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[smc] POI detection error: {e}")
+        return None
+
+
 def check_entry_condition(crt_setup: Dict, current_price: float, df_5m: pd.DataFrame) -> Optional[Dict]:
     """
     Check if SMC entry conditions are met
@@ -235,16 +367,58 @@ def check_entry_condition(crt_setup: Dict, current_price: float, df_5m: pd.DataF
             'liquidity_grab': liq_grab,
             'crt_setup': crt_setup['sweep_type'],
             'crt_timeframe': crt_setup.get('timeframe', '1d'),
+            'confirm_timeframe': crt_setup.get('confirm_timeframe'),
+            'entry_timeframe': crt_setup.get('entry_timeframe', '5m'),
+            'poi': crt_setup.get('poi'),
             'pdh': crt_setup.get('range_high', crt_setup.get('pdh')),
             'pdl': crt_setup.get('range_low', crt_setup.get('pdl')),
             'timestamp': datetime.utcnow().isoformat()
         }
         
-        logger.info(f"[smc] {symbol} ENTRY CONFIRMED — {direction} @ {entry:.5f} conf={confidence}% R:R={rr:.2f}")
+        logger.info(f"[smc] {symbol} ENTRY CONFIRMED — {direction} @ {entry:.5f} "
+                    f"conf={confidence}% R:R={rr:.2f} "
+                    f"[CRT {crt_setup.get('timeframe','?')} → "
+                    f"confirm {crt_setup.get('confirm_timeframe','?')} → "
+                    f"entry {crt_setup.get('entry_timeframe','?')}]")
         return signal
         
     except Exception as e:
         logger.error(f"[smc] entry check error: {e}")
+        return None
+
+
+def confirm_on_timeframe(crt_setup: Dict, confirm_tf: str) -> Optional[Dict]:
+    """
+    CASCADE STEP 2 — drop to the confirmation timeframe and look for a POI
+    (order block / breaker / FVG / support-resistance) that price is respecting
+    in the direction of the CRT trade.
+
+    Returns the POI dict (and attaches it to crt_setup) or None.
+    """
+    try:
+        from modules.market_data_forex import get_candles
+
+        symbol = crt_setup['symbol']
+        direction = crt_setup['direction']
+
+        df = get_candles(symbol, timeframe=confirm_tf, limit=60)
+        if df is None or len(df) < 20:
+            return None
+
+        price = float(df['close'].iloc[-1])
+        atr = calculate_atr(df)
+
+        poi = find_poi(df, direction, price, atr)
+        if not poi:
+            logger.debug(f"[cascade] {symbol} no POI on {confirm_tf}")
+            return None
+
+        logger.info(f"[cascade] {symbol} POI on {confirm_tf}: {poi['kind']} "
+                    f"(CRT {crt_setup.get('timeframe')})")
+        return poi
+
+    except Exception as e:
+        logger.error(f"[cascade] confirm error: {e}")
         return None
 
 

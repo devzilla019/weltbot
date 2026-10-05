@@ -269,12 +269,31 @@ def forex_pair_detail(symbol: str) -> Dict:
         if daily is None and isinstance(levels, dict) and levels:
             daily = next(iter(levels.values()))
 
+        # Active CRT setup (if any) — shows which timeframe triggered the trade
+        active_setup = None
+        try:
+            from main import _forex_active_setups
+            s = _forex_active_setups.get(symbol)
+            if s:
+                active_setup = {
+                    'timeframe': s.get('timeframe'),
+                    'sweep_type': s.get('sweep_type'),
+                    'direction': s.get('direction'),
+                    'target': s.get('target'),
+                    'confirm_timeframe': s.get('confirm_timeframe'),
+                    'entry_timeframe': s.get('entry_timeframe'),
+                    'poi': (s.get('poi') or {}).get('kind'),
+                }
+        except Exception:
+            pass
+
         return {
             'symbol': symbol,
             'current_price': price,
             'kronos_bias': bias,
             'crt_levels': daily,
             'crt_ranges': levels,
+            'active_setup': active_setup,
             'open_trade': {
                 'id': open_trade.id,
                 'signal': open_trade.signal,

@@ -34,6 +34,22 @@ CRT_TIMEFRAMES = ["1d", "4h", "1h", "15m"]
 # How many recent candles to inspect for a sweep
 _SWEEP_LOOKBACK = 5
 
+# ── Cascade: which timeframes to use for confirmation + entry ─────────────────
+# When a CRT sweep is found on the KEY timeframe, we drop down to:
+#   confirm -> look for a POI (order block / breaker / FVG / S&R) that price respects
+#   entry   -> look for the final SMC trigger (OB + FVG + liquidity grab)
+CRT_CASCADE = {
+    "1d":  {"confirm": "4h",  "entry": "15m"},
+    "4h":  {"confirm": "1h",  "entry": "15m"},
+    "1h":  {"confirm": "15m", "entry": "5m"},
+    "15m": {"confirm": "5m",  "entry": "5m"},
+}
+
+
+def get_cascade(timeframe: str) -> Dict[str, str]:
+    """Return {confirm, entry} timeframes for a given CRT timeframe."""
+    return CRT_CASCADE.get(timeframe, {"confirm": "15m", "entry": "5m"})
+
 # Cache: {symbol: {timeframe: level_dict}}
 _crt_levels_cache: Dict[str, Dict[str, dict]] = {}
 

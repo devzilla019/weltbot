@@ -337,46 +337,64 @@ def run_forex_entry_check():
             return
         
         from modules.market_data_forex import get_candles, get_current_price
-        from modules.forex_signal_engine import check_entry_condition
+        from modules.forex_signal_engine import check_entry_condition, confirm_on_timeframe
         from modules.forex_executor import place_forex_order
         from modules.forex_position_manager import can_open_forex_trade
         from modules.kronos_engine import get_cached_bias
-        
+        from modules.crt_detector import get_cascade
+
         for symbol in list(_forex_active_setups.keys()):
             try:
                 setup = _forex_active_setups[symbol]
-                
+                crt_tf = setup.get('timeframe', '1d')
+                cascade = get_cascade(crt_tf)
+                confirm_tf = cascade['confirm']
+                entry_tf = cascade['entry']
+
                 allowed, reason = can_open_forex_trade(symbol)
                 if not allowed:
                     print(f"[forex-entry] {symbol} blocked: {reason}")
                     continue
-                
+
+                # ── CASCADE STEP 2: confirm a POI on the mid timeframe ────────
+                poi = confirm_on_timeframe(setup, confirm_tf)
+                if not poi:
+                    # No POI yet — keep the setup alive and wait
+                    continue
+
+                setup['confirm_timeframe'] = confirm_tf
+                setup['entry_timeframe'] = entry_tf
+                setup['poi'] = poi
+
+                # ── CASCADE STEP 3: SMC entry on the lower timeframe ──────────
                 price = get_current_price(symbol)
                 if price is None:
                     continue
-                
-                df_5m = get_candles(symbol, timeframe='5m', limit=50)
-                if df_5m is None or len(df_5m) < 20:
+
+                df_entry = get_candles(symbol, timeframe=entry_tf, limit=60)
+                if df_entry is None or len(df_entry) < 20:
                     continue
-                
-                signal = check_entry_condition(setup, price, df_5m)
-                
+
+                signal = check_entry_condition(setup, price, df_entry)
+
                 if signal:
                     bias = get_cached_bias(symbol)
                     if bias:
                         signal['confidence'] += bias.get('confidence_boost', 0)
                         signal['confidence'] = min(signal['confidence'], 99)
-                    
+
                     from config import FOREX_MIN_CONF
                     if signal['confidence'] >= FOREX_MIN_CONF:
                         result = place_forex_order(signal, bias or {})
                         if result['success']:
-                            print(f"[forex-entry] TRADE PLACED — {signal['signal']} {symbol} @ {signal['entry_price']:.5f}")
+                            print(f"[forex-entry] TRADE PLACED — {signal['signal']} {symbol} "
+                                  f"@ {signal['entry_price']:.5f} "
+                                  f"[CRT {crt_tf} → confirm {confirm_tf} ({poi['kind']}) → entry {entry_tf}]")
                             _forex_active_setups.pop(symbol, None)
                     else:
                         print(f"[forex-entry] {symbol} confidence too low: {signal['confidence']:.1f}%")
                         _forex_active_setups.pop(symbol, None)
-                
+
             except Exception as e:
                 print(f"[forex-entry] error {symbol}: {e}")
                 _forex_active_setups.pop(symbol, None)
