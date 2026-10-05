@@ -1,390 +1,481 @@
 """
 backend/modules/market_data_forex.py
-MetaApi candle fetching for Forex/Metals.
+Capital.com REST API market data for Forex/Metals.
 
-IMPORTANT: MetaApi's SDK is fully async and its internal locks/connections are
-bound to a single event loop. The bot calls these functions from APScheduler
-threads, so we run ONE dedicated background event loop for the whole process
-and submit every coroutine to it. This avoids the classic
-"<asyncio.Lock> is bound to a different event loop" error.
+Pure synchronous — Capital.com is a session-based REST API.
+A single CapitalSession handles login + auto-renewal (10 min expiry).
+All functions fail gracefully (return None / empty list) on any error.
 """
-import asyncio
-import os
-import threading
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
 import logging
+import threading
+import time
+from datetime import datetime
+from typing import Optional, List, Dict
+
+import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
-_metaapi_connection = None
-_metaapi_rpc = None
-_connection_lock: Optional[asyncio.Lock] = None   # created inside the loop
+# ── Resolution mapping (bot format -> Capital.com resolution) ─────────────────
+_RES_MAP = {
+    "1m": "MINUTE", "5m": "MINUTE_5", "15m": "MINUTE_15", "30m": "MINUTE_30",
+    "1h": "HOUR", "4h": "HOUR_4", "1d": "DAY", "1w": "WEEK",
+    # already-Capital formats pass through
+    "MINUTE": "MINUTE", "MINUTE_5": "MINUTE_5", "MINUTE_15": "MINUTE_15",
+    "MINUTE_30": "MINUTE_30", "HOUR": "HOUR", "HOUR_4": "HOUR_4",
+    "DAY": "DAY", "WEEK": "WEEK",
+}
+
 _last_error: Optional[str] = None
-
-# ── Dedicated background event loop ───────────────────────────────────────────
-_loop: Optional[asyncio.AbstractEventLoop] = None
-_loop_thread: Optional[threading.Thread] = None
-_loop_ready = threading.Event()
-
-
-def _start_loop():
-    """Start the dedicated event loop in a daemon thread (idempotent)."""
-    global _loop, _loop_thread
-    if _loop is not None and _loop.is_running():
-        return
-    if _loop_thread is not None and _loop_thread.is_alive():
-        _loop_ready.wait(timeout=5)
-        return
-
-    def _runner():
-        global _loop
-        _loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_loop)
-        _loop_ready.set()
-        _loop.run_forever()
-
-    _loop_thread = threading.Thread(target=_runner, name="metaapi-loop", daemon=True)
-    _loop_thread.start()
-    _loop_ready.wait(timeout=5)
-
-
-def _run(coro, timeout: float = 60.0):
-    """Submit a coroutine to the dedicated loop and block for the result."""
-    _start_loop()
-    if _loop is None:
-        raise RuntimeError("metaapi event loop unavailable")
-    fut = asyncio.run_coroutine_threadsafe(coro, _loop)
-    return fut.result(timeout=timeout)
-
-
-def _get_lock() -> asyncio.Lock:
-    """Lazily create the connection lock inside the dedicated loop."""
-    global _connection_lock
-    if _connection_lock is None:
-        _connection_lock = asyncio.Lock()
-    return _connection_lock
 
 
 def get_last_error() -> Optional[str]:
     return _last_error
 
 
-# ── Connection ────────────────────────────────────────────────────────────────
+# ── Session ───────────────────────────────────────────────────────────────────
 
-async def _get_metaapi_connection():
-    """Get or create MetaApi connection (runs inside the dedicated loop)."""
-    global _metaapi_connection, _metaapi_rpc, _last_error
+class CapitalSession:
+    """
+    Manages the Capital.com session (CST + X-SECURITY-TOKEN).
+    Auto-renews after 9 minutes of inactivity (session expires at 10 min).
+    """
 
-    from config import METAAPI_TOKEN, METAAPI_ACCOUNT_ID, FOREX_ENABLED
+    def __init__(self):
+        self.cst: Optional[str] = None
+        self.security_token: Optional[str] = None
+        self.last_login: float = 0.0
+        self._lock = threading.Lock()
 
-    if not FOREX_ENABLED:
-        _last_error = "FOREX_ENABLED is false"
-        return None, None
+    def _configured(self) -> bool:
+        from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD
+        return bool(CAPITAL_API_KEY and CAPITAL_EMAIL and CAPITAL_PASSWORD)
 
-    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        _last_error = "METAAPI_TOKEN / METAAPI_ACCOUNT_ID not set"
-        logger.error(f"[metaapi] {_last_error}")
-        return None, None
+    def login(self) -> bool:
+        """Authenticate and store CST + X-SECURITY-TOKEN."""
+        global _last_error
+        from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD, CAPITAL_BASE_URL
 
-    async with _get_lock():
-        if _metaapi_connection is not None:
-            try:
-                if _metaapi_connection.health_status.get('connected'):
-                    return _metaapi_connection, _metaapi_rpc
-            except Exception:
-                pass
+        if not self._configured():
+            _last_error = "Capital.com not configured (CAPITAL_API_KEY / EMAIL / PASSWORD)"
+            return False
 
         try:
-            from metaapi_cloud_sdk import MetaApi
+            url = f"{CAPITAL_BASE_URL}/api/v1/session"
+            headers = {"X-CAP-API-KEY": CAPITAL_API_KEY, "Content-Type": "application/json"}
+            body = {
+                "identifier": CAPITAL_EMAIL,
+                "password": CAPITAL_PASSWORD,
+                "encryptionEnabled": False,
+            }
+            resp = requests.post(url, headers=headers, json=body, timeout=20)
 
-            logger.info("[metaapi] connecting...")
-            api = MetaApi(METAAPI_TOKEN)
-            account = await api.metatrader_account_api.get_account(METAAPI_ACCOUNT_ID)
+            if resp.status_code not in (200, 201):
+                _last_error = f"login HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[capital] login failed: {_last_error}")
+                return False
 
-            _metaapi_connection = account.get_streaming_connection()
-            await _metaapi_connection.connect()
-            await _metaapi_connection.wait_synchronized()
+            self.cst = resp.headers.get("CST")
+            self.security_token = resp.headers.get("X-SECURITY-TOKEN")
+            if not self.cst or not self.security_token:
+                _last_error = "login succeeded but tokens missing in response headers"
+                logger.error(f"[capital] {_last_error}")
+                return False
 
-            _metaapi_rpc = account.get_rpc_connection()
-            await _metaapi_rpc.connect()
-            await _metaapi_rpc.wait_synchronized()
-
+            self.last_login = time.time()
             _last_error = None
-            logger.info("[metaapi] connected successfully")
-            return _metaapi_connection, _metaapi_rpc
+            logger.info("[capital] session established")
+            return True
 
         except Exception as e:
-            msg = str(e)
-            if "invalid auth-token" in msg or "authorize" in msg.lower():
-                _last_error = ("MetaApi rejected the token. Check METAAPI_TOKEN is a valid "
-                               "MetaApi token (not your MT5 password) and METAAPI_ACCOUNT_ID "
-                               "belongs to that token's account.")
-            else:
-                _last_error = msg
-            logger.error(f"[metaapi] connection failed: {msg}")
-            _metaapi_connection = None
-            _metaapi_rpc = None
-            return None, None
+            _last_error = str(e)
+            logger.error(f"[capital] login error: {e}")
+            return False
+
+    def _ensure_session(self) -> bool:
+        """Re-login if the session is missing or older than 9 minutes."""
+        with self._lock:
+            if not self.cst or not self.security_token:
+                return self.login()
+            if (time.time() - self.last_login) > 540:   # 9 minutes
+                logger.info("[capital] session expiring — renewing")
+                return self.login()
+            return True
+
+    def _auth_headers(self) -> Dict[str, str]:
+        from config import CAPITAL_API_KEY
+        return {
+            "X-CAP-API-KEY": CAPITAL_API_KEY,
+            "CST": self.cst or "",
+            "X-SECURITY-TOKEN": self.security_token or "",
+            "Content-Type": "application/json",
+        }
+
+    def get(self, path: str, params: Optional[dict] = None) -> Optional[requests.Response]:
+        global _last_error
+        if not self._ensure_session():
+            return None
+        from config import CAPITAL_BASE_URL
+        try:
+            resp = requests.get(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                params=params, timeout=20)
+            if resp.status_code == 401:
+                # token expired mid-flight — re-login once and retry
+                if self.login():
+                    resp = requests.get(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                        params=params, timeout=20)
+            if resp.status_code not in (200, 201):
+                _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[capital] GET {path}: {_last_error}")
+                return None
+            _last_error = None
+            return resp
+        except Exception as e:
+            _last_error = str(e)
+            logger.error(f"[capital] GET {path} error: {e}")
+            return None
+
+    def post(self, path: str, body: dict) -> Optional[requests.Response]:
+        global _last_error
+        if not self._ensure_session():
+            return None
+        from config import CAPITAL_BASE_URL
+        try:
+            resp = requests.post(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                 json=body, timeout=20)
+            if resp.status_code == 401:
+                if self.login():
+                    resp = requests.post(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                         json=body, timeout=20)
+            if resp.status_code not in (200, 201):
+                _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[capital] POST {path}: {_last_error}")
+                return None
+            _last_error = None
+            return resp
+        except Exception as e:
+            _last_error = str(e)
+            logger.error(f"[capital] POST {path} error: {e}")
+            return None
+
+    def delete(self, path: str) -> Optional[requests.Response]:
+        global _last_error
+        if not self._ensure_session():
+            return None
+        from config import CAPITAL_BASE_URL
+        try:
+            resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(), timeout=20)
+            if resp.status_code == 401:
+                if self.login():
+                    resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(), timeout=20)
+            if resp.status_code not in (200, 201):
+                _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[capital] DELETE {path}: {_last_error}")
+                return None
+            _last_error = None
+            return resp
+        except Exception as e:
+            _last_error = str(e)
+            logger.error(f"[capital] DELETE {path} error: {e}")
+            return None
+
+
+_session = CapitalSession()
+
+
+def get_session() -> CapitalSession:
+    return _session
+
+
+def reconnect() -> None:
+    """Force a fresh login."""
+    _session.cst = None
+    _session.security_token = None
+    _session.login()
 
 
 # ── Candles ───────────────────────────────────────────────────────────────────
 
-async def _fetch_candles_async(symbol: str, timeframe: str, start_time: datetime, limit: int = 400) -> Optional[pd.DataFrame]:
+def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optional[pd.DataFrame]:
+    """
+    Fetch OHLCV candles from Capital.com.
+    Returns DataFrame: timestamp, open, high, low, close, volume
+    """
+    from config import to_epic
+    epic = to_epic(symbol)
+    resolution = _RES_MAP.get(timeframe, "HOUR")
+
+    resp = _session.get(f"/api/v1/prices/{epic}",
+                        params={"resolution": resolution, "max": min(int(limit), 1000)})
+    if resp is None:
+        return None
+
     try:
-        _, rpc = await _get_metaapi_connection()
-        if rpc is None:
+        prices = resp.json().get("prices", [])
+        if not prices:
+            logger.warning(f"[capital] no candles for {epic} {resolution}")
             return None
 
-        candles = await rpc.get_historical_candles(
-            symbol=symbol, timeframe=timeframe, start_time=start_time, limit=limit,
-        )
-        if not candles:
-            logger.warning(f"[metaapi] no candles returned for {symbol} {timeframe}")
+        rows = []
+        for p in prices:
+            try:
+                rows.append({
+                    "timestamp": p["snapshotTime"],
+                    "open":  float(p["openPrice"]["mid"]),
+                    "high":  float(p["highPrice"]["mid"]),
+                    "low":   float(p["lowPrice"]["mid"]),
+                    "close": float(p["closePrice"]["mid"]),
+                    "volume": 0,
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        if not rows:
             return None
 
-        df = pd.DataFrame([{
-            'timestamp': c['time'],
-            'open': c['open'], 'high': c['high'], 'low': c['low'], 'close': c['close'],
-            'volume': c.get('tickVolume', 0),
-        } for c in candles])
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values('timestamp').reset_index(drop=True)
+        df = pd.DataFrame(rows)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df
 
     except Exception as e:
-        logger.error(f"[metaapi] fetch error {symbol} {timeframe}: {e}")
+        logger.error(f"[capital] candle parse error {epic}: {e}")
         return None
 
 
-def get_candles(symbol: str, timeframe: str = '1h', limit: int = 400) -> Optional[pd.DataFrame]:
-    """Sync wrapper — submits to the dedicated loop."""
-    if timeframe == '1h':
-        start_time = datetime.utcnow() - timedelta(hours=limit + 10)
-    elif timeframe == '15m':
-        start_time = datetime.utcnow() - timedelta(minutes=15 * limit + 100)
-    elif timeframe == '5m':
-        start_time = datetime.utcnow() - timedelta(minutes=5 * limit + 50)
-    elif timeframe == '1d':
-        start_time = datetime.utcnow() - timedelta(days=limit + 5)
-    else:
-        start_time = datetime.utcnow() - timedelta(hours=limit)
+# ── Current price ─────────────────────────────────────────────────────────────
+
+def get_current_price(symbol: str) -> float:
+    """Return midpoint of bid/offer. 0.0 on error."""
+    from config import to_epic
+    epic = to_epic(symbol)
+
+    resp = _session.get(f"/api/v1/markets/{epic}")
+    if resp is None:
+        return 0.0
 
     try:
-        return _run(_fetch_candles_async(symbol, timeframe, start_time, limit))
+        snap = resp.json().get("snapshot", {})
+        bid = float(snap.get("bid", 0) or 0)
+        offer = float(snap.get("offer", 0) or 0)
+        if bid and offer:
+            return (bid + offer) / 2
+        return bid or offer or 0.0
     except Exception as e:
-        logger.error(f"[metaapi] get_candles error {symbol}: {e}")
-        return None
+        logger.error(f"[capital] price parse error {epic}: {e}")
+        return 0.0
 
 
-# ── Price ─────────────────────────────────────────────────────────────────────
-
-async def _get_current_price_async(symbol: str) -> Optional[float]:
-    try:
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return None
-        price = await conn.get_symbol_price(symbol)
-        return (price['ask'] + price['bid']) / 2
-    except Exception as e:
-        logger.error(f"[metaapi] price error {symbol}: {e}")
-        return None
-
-
-def get_current_price(symbol: str) -> Optional[float]:
-    try:
-        return _run(_get_current_price_async(symbol))
-    except Exception as e:
-        logger.error(f"[metaapi] get_current_price error {symbol}: {e}")
-        return None
-
-
-# ── Account info ──────────────────────────────────────────────────────────────
-
-async def _get_account_info_async() -> Optional[Dict]:
-    try:
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return None
-        info = conn.terminal_state.account_information
-        if not info:
-            return None
-        return {
-            'balance':  float(info.get('balance', 0) or 0),
-            'equity':   float(info.get('equity', 0) or 0),
-            'margin':   float(info.get('margin', 0) or 0),
-            'free_margin': float(info.get('freeMargin', 0) or 0),
-            'currency': info.get('currency', 'USD'),
-            'leverage': info.get('leverage', 0),
-            'profit':   float(info.get('profit', 0) or 0),
-        }
-    except Exception as e:
-        logger.error(f"[metaapi] account info error: {e}")
-        return None
-
-
-def get_account_info() -> Optional[Dict]:
-    try:
-        return _run(_get_account_info_async())
-    except Exception as e:
-        logger.error(f"[metaapi] get_account_info error: {e}")
-        return None
-
-
-# ── Positions ─────────────────────────────────────────────────────────────────
-
-async def _get_positions_async() -> List[Dict]:
-    try:
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return []
-        positions = conn.terminal_state.positions or []
-        return [{
-            'id': p['id'], 'symbol': p['symbol'], 'type': p['type'],
-            'volume': p['volume'], 'open_price': p['openPrice'],
-            'current_price': p['currentPrice'], 'profit': p['profit'],
-            'swap': p.get('swap', 0), 'commission': p.get('commission', 0),
-            'sl': p.get('stopLoss'), 'tp': p.get('takeProfit'), 'open_time': p['time'],
-        } for p in positions]
-    except Exception as e:
-        logger.error(f"[metaapi] positions error: {e}")
-        return []
-
+# ── Open positions ────────────────────────────────────────────────────────────
 
 def get_open_positions() -> List[Dict]:
+    """
+    Fetch open positions.
+    Returns: id, symbol, signal, size, entry_price, current_price,
+             unrealized_pnl, sl, tp
+    """
+    from config import from_epic
+
+    resp = _session.get("/api/v1/positions")
+    if resp is None:
+        return []
+
     try:
-        return _run(_get_positions_async())
+        positions = resp.json().get("positions", [])
+        out = []
+        for item in positions:
+            try:
+                pos = item.get("position", {})
+                market = item.get("market", {})
+                direction = pos.get("direction", "BUY")
+                bid = float(market.get("bid", 0) or 0)
+                offer = float(market.get("offer", 0) or 0)
+                current = (bid + offer) / 2 if (bid and offer) else (bid or offer or 0.0)
+                out.append({
+                    "id":             pos.get("dealId"),
+                    "symbol":         from_epic(market.get("epic", "")),
+                    "epic":           market.get("epic"),
+                    "signal":         direction,
+                    "size":           float(pos.get("size", 0) or 0),
+                    "entry_price":    float(pos.get("openLevel", 0) or 0),
+                    "current_price":  current,
+                    "unrealized_pnl": float(pos.get("upl", 0) or 0),
+                    "sl":             float(pos["stopLevel"]) if pos.get("stopLevel") else None,
+                    "tp":             float(pos["limitLevel"]) if pos.get("limitLevel") else None,
+                    "open_time":      pos.get("createdDateUTC"),
+                })
+            except Exception as e:
+                logger.warning(f"[capital] position parse error: {e}")
+                continue
+        return out
+
     except Exception as e:
-        logger.error(f"[metaapi] get_open_positions error: {e}")
+        logger.error(f"[capital] positions parse error: {e}")
         return []
 
 
-# ── Order placement (used by forex_executor) ──────────────────────────────────
+# ── Account balance ───────────────────────────────────────────────────────────
 
-async def _place_order_async(symbol: str, signal: str, lots: float, sl: float, tp: float) -> Dict:
+def get_capital_balance() -> Dict:
+    """
+    Fetch account balance.
+    Returns: {balance, profit_loss, deposit, available, currency, connected}
+    """
+    empty = {"balance": 0.0, "profit_loss": 0.0, "deposit": 0.0,
+             "available": 0.0, "currency": "USD", "connected": False}
+
+    resp = _session.get("/api/v1/accounts")
+    if resp is None:
+        return empty
+
     try:
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return {'success': False, 'error': _last_error or 'MetaApi connection failed'}
-
-        if signal == 'BUY':
-            result = await conn.create_market_buy_order(symbol=symbol, volume=lots, stop_loss=sl, take_profit=tp)
-        else:
-            result = await conn.create_market_sell_order(symbol=symbol, volume=lots, stop_loss=sl, take_profit=tp)
-
-        if result.get('orderId'):
-            logger.info(f"[metaapi] order placed — {signal} {symbol} {lots} lots")
-            return {
-                'success': True,
-                'position_id': result.get('positionId', result['orderId']),
-                'fill_price': result.get('price', 0),
-                'order_id': result['orderId'],
-            }
-        return {'success': False, 'error': result.get('message', 'Unknown error')}
+        accounts = resp.json().get("accounts", [])
+        if not accounts:
+            return empty
+        a = accounts[0]
+        balance = float(a.get("balance", 0) or 0)
+        profit_loss = float(a.get("profitLoss", 0) or 0)
+        deposit = float(a.get("deposit", 0) or 0)
+        return {
+            "balance":     balance,
+            "profit_loss": profit_loss,
+            "deposit":     deposit,
+            "available":   float(a.get("available", balance) or balance),
+            "currency":    a.get("currency", "USD"),
+            "connected":   True,
+        }
     except Exception as e:
-        logger.error(f"[metaapi] place order error {symbol}: {e}")
-        return {'success': False, 'error': str(e)}
+        logger.error(f"[capital] balance parse error: {e}")
+        return empty
 
 
-def place_order(symbol: str, signal: str, lots: float, sl: float, tp: float) -> Dict:
+# ── Order placement ───────────────────────────────────────────────────────────
+
+def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> Dict:
+    """
+    Open a position on Capital.com.
+    Returns: {success, deal_id, fill_price, error}
+    """
+    from config import to_epic
+    epic = to_epic(symbol)
+
+    body = {
+        "epic": epic,
+        "direction": signal,          # BUY / SELL
+        "size": round(float(size), 2),
+        "guaranteedStop": False,
+    }
+    if sl:
+        body["stopLevel"] = round(float(sl), 5)
+    if tp:
+        body["profitLevel"] = round(float(tp), 5)
+
+    resp = _session.post("/api/v1/positions", body)
+    if resp is None:
+        return {"success": False, "error": _last_error or "order request failed"}
+
     try:
-        return _run(_place_order_async(symbol, signal, lots, sl, tp))
+        deal_ref = resp.json().get("dealReference")
+        if not deal_ref:
+            return {"success": False, "error": "no dealReference returned"}
+
+        # Confirm the deal to get the fill price + dealId
+        confirm = _session.get(f"/api/v1/confirms/{deal_ref}")
+        if confirm is None:
+            return {"success": False, "error": "order placed but confirm failed",
+                    "deal_reference": deal_ref}
+
+        c = confirm.json()
+        status = c.get("status", "")
+        if status not in ("ACCEPTED", "OPEN", "EXECUTED"):
+            return {"success": False, "error": f"deal status={status}",
+                    "deal_reference": deal_ref}
+
+        deal_id = c.get("dealId")
+        fill = float(c.get("level", 0) or 0)
+        logger.info(f"[capital] order filled — {signal} {epic} size={size} @ {fill}")
+        return {
+            "success": True,
+            "deal_id": deal_id,
+            "fill_price": fill,
+            "deal_reference": deal_ref,
+        }
+
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        logger.error(f"[capital] order confirm error {epic}: {e}")
+        return {"success": False, "error": str(e)}
 
 
-async def _close_position_async(position_id: str) -> bool:
-    try:
-        conn, _ = await _get_metaapi_connection()
-        if conn is None:
-            return False
-        await conn.close_position(position_id)
-        logger.info(f"[metaapi] position closed — id={position_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[metaapi] close position error {position_id}: {e}")
-        return False
+# ── Close position ────────────────────────────────────────────────────────────
+
+def close_position(deal_id: str) -> Dict:
+    """Close an open position by dealId. Returns {success, error}."""
+    resp = _session.delete(f"/api/v1/positions/{deal_id}")
+    if resp is None:
+        return {"success": False, "error": _last_error or "close request failed"}
+    logger.info(f"[capital] position closed — dealId={deal_id}")
+    return {"success": True}
 
 
-def close_position(position_id: str) -> bool:
-    try:
-        return _run(_close_position_async(position_id))
-    except Exception as e:
-        logger.error(f"[metaapi] close_position error: {e}")
-        return False
+# ── Compatibility shims ───────────────────────────────────────────────────────
+
+def get_account_info() -> Optional[Dict]:
+    """Alias for get_capital_balance() with legacy field names."""
+    b = get_capital_balance()
+    if not b.get("connected"):
+        return None
+    return {
+        "balance":     b["balance"],
+        "equity":      b["balance"] + b["profit_loss"],
+        "margin":      0.0,
+        "free_margin": b["available"],
+        "currency":    b["currency"],
+        "leverage":    0,
+        "profit":      b["profit_loss"],
+    }
 
 
-# ── Reconnect ─────────────────────────────────────────────────────────────────
-
-async def _reconnect_async():
-    global _metaapi_connection, _metaapi_rpc
-    async with _get_lock():
-        for c in (_metaapi_connection, _metaapi_rpc):
-            if c:
-                try:
-                    await c.close()
-                except Exception:
-                    pass
-        _metaapi_connection = None
-        _metaapi_rpc = None
-    await _get_metaapi_connection()
-
-
-def reconnect():
-    try:
-        _run(_reconnect_async())
-        logger.info("[metaapi] reconnected")
-    except Exception as e:
-        logger.error(f"[metaapi] reconnect error: {e}")
-
-
-# ── Health check (for the Test Connection button) ─────────────────────────────
+# ── Health check (Test Connection button) ─────────────────────────────────────
 
 def test_connection() -> Dict:
-    """
-    Full connectivity test used by /api/forex/test-connection.
-    Returns a structured report the UI can render.
-    """
-    from config import METAAPI_TOKEN, METAAPI_ACCOUNT_ID, FOREX_ENABLED
+    """Full connectivity test used by /api/forex/test-connection."""
+    from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD, CAPITAL_DEMO, FOREX_ENABLED
 
     report = {
-        'forex_enabled': FOREX_ENABLED,
-        'token_set': bool(METAAPI_TOKEN),
-        'account_id_set': bool(METAAPI_ACCOUNT_ID),
-        'connected': False,
-        'account': None,
-        'symbols_ok': [],
-        'symbols_failed': [],
-        'error': None,
+        "provider": "capital.com",
+        "environment": "demo" if CAPITAL_DEMO else "live",
+        "forex_enabled": FOREX_ENABLED,
+        "api_key_set": bool(CAPITAL_API_KEY),
+        "email_set": bool(CAPITAL_EMAIL),
+        "password_set": bool(CAPITAL_PASSWORD),
+        "connected": False,
+        "account": None,
+        "symbols_ok": [],
+        "symbols_failed": [],
+        "error": None,
     }
 
     if not FOREX_ENABLED:
-        report['error'] = "FOREX_ENABLED is false — set it to true on Railway"
+        report["error"] = "FOREX_ENABLED is false — set it to true on Railway"
         return report
-    if not METAAPI_TOKEN or not METAAPI_ACCOUNT_ID:
-        report['error'] = "METAAPI_TOKEN or METAAPI_ACCOUNT_ID missing"
+    if not (CAPITAL_API_KEY and CAPITAL_EMAIL and CAPITAL_PASSWORD):
+        report["error"] = "CAPITAL_API_KEY / CAPITAL_EMAIL / CAPITAL_PASSWORD missing"
         return report
 
-    try:
-        acct = get_account_info()
-        if acct:
-            report['connected'] = True
-            report['account'] = acct
+    bal = get_capital_balance()
+    if bal.get("connected"):
+        report["connected"] = True
+        report["account"] = bal
+    else:
+        report["error"] = _last_error or "Could not read account balance"
+        return report
+
+    for sym in ("EURUSD", "XAUUSD"):
+        df = get_candles(sym, timeframe="1h", limit=5)
+        if df is not None and len(df) > 0:
+            report["symbols_ok"].append(sym)
         else:
-            report['error'] = _last_error or "Could not read account information"
-            return report
-
-        # Probe a couple of symbols
-        for sym in ("EURUSD", "XAUUSD"):
-            df = get_candles(sym, timeframe='1h', limit=5)
-            if df is not None and len(df) > 0:
-                report['symbols_ok'].append(sym)
-            else:
-                report['symbols_failed'].append(sym)
-
-    except Exception as e:
-        report['error'] = str(e)
+            report["symbols_failed"].append(sym)
 
     return report

@@ -70,11 +70,33 @@ def portfolio(db: Session = Depends(get_db)):
                 "unrealized": unreal,
                 "size":       t.position_sz,
             })
+
+    # ── Forex (Capital.com) balance — separate from crypto ────────────────────
+    forex_balance     = 0.0
+    forex_profit_loss = 0.0
+    forex_connected   = False
+    try:
+        from config import FOREX_ENABLED
+        if FOREX_ENABLED:
+            from modules.market_data_forex import get_capital_balance
+            fb = get_capital_balance()
+            forex_balance     = fb.get("balance", 0.0)
+            forex_profit_loss = fb.get("profit_loss", 0.0)
+            forex_connected   = fb.get("connected", False)
+    except Exception as e:
+        print(f"[analytics] forex balance error: {e}")
+
+    total_balance = round(balance + forex_balance, 2)
+
     return {
-        "balance_usdt":   round(balance, 4),
-        "open_count":     len(positions),
-        "unrealized_pnl": round(unrealized, 4),
-        "positions":      positions,
+        "balance_usdt":       round(balance, 4),          # crypto / Binance
+        "forex_balance":      round(forex_balance, 2),    # Capital.com balance
+        "forex_profit_loss":  round(forex_profit_loss, 2),
+        "forex_connected":    forex_connected,
+        "total_balance":      total_balance,              # crypto + forex
+        "open_count":         len(positions),
+        "unrealized_pnl":     round(unrealized, 4),
+        "positions":          positions,
     }
 
 

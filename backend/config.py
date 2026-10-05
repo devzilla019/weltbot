@@ -90,13 +90,45 @@ ALLOWED_ORIGINS = os.getenv(
 NEWS_BLACKOUT_ENABLED = env_bool("NEWS_BLACKOUT_ENABLED", True)
 TWITTER_BEARER_TOKEN  = os.getenv("TWITTER_BEARER_TOKEN",  "")
 
-# ── MetaApi (Forex/Metals) ────────────────────────────────────────────────────
-METAAPI_TOKEN      = os.getenv("METAAPI_TOKEN",      "")
-METAAPI_ACCOUNT_ID = os.getenv("METAAPI_ACCOUNT_ID", "")
-FOREX_ENABLED      = env_bool("FOREX_ENABLED", False)
-FOREX_PAIRS        = [p.strip() for p in os.getenv(
+# ── Capital.com (Forex/Metals) ────────────────────────────────────────────────
+CAPITAL_API_KEY  = os.getenv("CAPITAL_API_KEY",  "")
+CAPITAL_EMAIL    = os.getenv("CAPITAL_EMAIL",    "")
+CAPITAL_PASSWORD = os.getenv("CAPITAL_PASSWORD", "")
+CAPITAL_DEMO     = env_bool("CAPITAL_DEMO", True)
+
+CAPITAL_BASE_URL = (
+    "https://demo-api-capital.backend-capital.com" if CAPITAL_DEMO
+    else "https://api-capital.backend-capital.com"
+)
+
+FOREX_ENABLED = env_bool("FOREX_ENABLED", False)
+FOREX_PAIRS   = [p.strip() for p in os.getenv(
     "FOREX_PAIRS", "XAUUSD,EURUSD,GBPUSD,EURCHF,EURJPY,GBPJPY,AUDJPY,NZDCAD"
 ).split(",") if p.strip()]
+
+# Capital.com uses short epic codes
+CAPITAL_EPIC_MAP = {
+    "XAUUSD": "GOLD",
+    "EURUSD": "EURUSD",
+    "GBPUSD": "GBPUSD",
+    "EURCHF": "EURCHF",
+    "EURJPY": "EURJPY",
+    "GBPJPY": "GBPJPY",
+    "AUDJPY": "AUDJPY",
+    "NZDCAD": "NZDCAD",
+}
+
+
+def to_epic(symbol: str) -> str:
+    """XAUUSD -> GOLD, EURUSD -> EURUSD."""
+    s = symbol.replace("/", "").replace("_", "").upper()
+    return CAPITAL_EPIC_MAP.get(s, s)
+
+
+def from_epic(epic: str) -> str:
+    """GOLD -> XAUUSD, EURUSD -> EURUSD."""
+    reverse = {v: k for k, v in CAPITAL_EPIC_MAP.items()}
+    return reverse.get(epic, epic)
 
 # ── Kronos AI ──────────────────────────────────────────────────────────────────
 KRONOS_ENABLED     = env_bool("KRONOS_ENABLED", False)

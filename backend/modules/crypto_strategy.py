@@ -7,7 +7,7 @@ Applies the SAME 3-layer strategy to crypto (Binance) that forex uses:
   LAYER 3 — SMC entry: order block + FVG + liquidity grab on 5m
 
 This module is asset-agnostic: it reuses kronos_engine, crt_detector and
-forex_signal_engine, feeding them Binance OHLCV instead of MetaApi candles.
+forex_signal_engine, feeding them Binance OHLCV instead of broker candles.
 """
 import logging
 from datetime import datetime, timedelta

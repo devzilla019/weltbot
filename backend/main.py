@@ -391,7 +391,7 @@ def run_forex_entry_check():
 
 
 def run_forex_position_monitor():
-    """Monitor forex positions via MetaApi"""
+    """Monitor forex positions via Capital.com"""
     from config import FOREX_ENABLED
     if not FOREX_ENABLED:
         return
@@ -596,16 +596,33 @@ async def startup():
     from config import FOREX_ENABLED, KRONOS_ENABLED
     
     if FOREX_ENABLED:
-        print("[weltbot] forex enabled — initializing...")
-        
+        print("[weltbot] forex enabled — initializing Capital.com...")
+
+        # Verify Capital.com credentials at startup
+        def _verify_capital():
+            try:
+                from modules.market_data_forex import get_capital_balance, get_last_error
+                bal = get_capital_balance()
+                if bal.get("connected"):
+                    env = "demo" if os.getenv("CAPITAL_DEMO", "true").lower() == "true" else "live"
+                    print(f"[capital] connected — {env} balance=${bal['balance']:,.2f} "
+                          f"{bal.get('currency','USD')}")
+                else:
+                    print(f"[capital] NOT connected — {get_last_error()}")
+            except Exception as e:
+                print(f"[capital] startup check error: {e}")
+        threading.Thread(target=_verify_capital, daemon=True).start()
+
         if KRONOS_ENABLED:
             print("[weltbot] loading Kronos model...")
             from modules.kronos_engine import _load_kronos_model
             threading.Thread(target=_load_kronos_model, daemon=True).start()
-        
+        else:
+            print("[kronos] disabled — using neutral bias")
+
         from modules.crt_detector import update_pdh_pdl_all_pairs
         threading.Thread(target=update_pdh_pdl_all_pairs, daemon=True).start()
-        
+
         threading.Thread(target=run_kronos_bias_update, daemon=True).start()
         threading.Thread(target=run_crt_scan, daemon=True).start()
     
@@ -650,25 +667,32 @@ def bot_status():
     forex_info = {}
     if FOREX_ENABLED:
         from modules.kronos_engine import is_kronos_available
-        forex_balance = 0.0
-        forex_equity  = 0.0
+        forex_balance     = 0.0
+        forex_profit_loss = 0.0
+        forex_connected   = False
         try:
-            from modules.market_data_forex import get_account_info
-            acct = get_account_info()
-            if acct:
-                forex_balance = acct.get("balance", 0.0)
-                forex_equity  = acct.get("equity", 0.0)
+            from modules.market_data_forex import get_capital_balance
+            fb = get_capital_balance()
+            forex_balance     = fb.get("balance", 0.0)
+            forex_profit_loss = fb.get("profit_loss", 0.0)
+            forex_connected   = fb.get("connected", False)
         except Exception as e:
             print(f"[bot] forex balance error: {e}")
         forex_info = {
             "forex_enabled": True,
+            "forex_provider": "capital.com",
             "kronos_available": is_kronos_available(),
             "forex_active_setups": list(_forex_active_setups.keys()),
             "forex_balance": round(forex_balance, 2),
-            "forex_equity":  round(forex_equity, 2),
+            "forex_equity":  round(forex_balance + forex_profit_loss, 2),
+            "forex_unrealized": round(forex_profit_loss, 2),
+            "forex_connected": forex_connected,
+            "total_balance": round(balance + forex_balance, 2),
         }
     else:
-        forex_info = {"forex_enabled": False, "forex_balance": 0.0, "forex_equity": 0.0}
+        forex_info = {"forex_enabled": False, "forex_balance": 0.0, "forex_equity": 0.0,
+                      "forex_unrealized": 0.0, "forex_connected": False,
+                      "total_balance": round(balance, 2)}
 
     # Crypto strategy state
     crypto_info = {"kronos_enabled": KRONOS_ENABLED, "crypto_active_setups": []}

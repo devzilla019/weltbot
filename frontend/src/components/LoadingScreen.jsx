@@ -9,7 +9,7 @@ const STEPS=[
   "Initializing WeltBot core…",
   "Loading Kronos AI engine…",
   "Connecting to Binance…",
-  "Linking MetaApi / MT5…",
+  "Linking Capital.com…",
   "Calibrating CRT + SMC layers…",
   "Syncing market data…",
   "Ready.",

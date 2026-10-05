@@ -13,8 +13,10 @@ export default function OverviewTab({summary,portfolio,signals,botStatus,handleC
   const pnl=summary?.total_pnl??0;
   const wr=summary?.win_rate??0;
   const positions=portfolio?.positions||[];
-  const cryptoBal=botStatus?.balance_usdt??0;
-  const forexBal=botStatus?.forex_balance??0;
+  const cryptoBal=portfolio?.balance_usdt??botStatus?.balance_usdt??0;
+  const forexBal=portfolio?.forex_balance??botStatus?.forex_balance??0;
+  const forexPL=portfolio?.forex_profit_loss??botStatus?.forex_unrealized??0;
+  const totalBal=portfolio?.total_balance??(cryptoBal+forexBal);
   const unrealized=portfolio?.unrealized_pnl??0;
 
   useEffect(()=>{
@@ -40,14 +42,27 @@ export default function OverviewTab({summary,portfolio,signals,botStatus,handleC
 
       <div className="metric-grid">
         <div className="metric" style={{boxShadow:balFlash?`0 0 24px ${balFlash==="up"?"rgba(52,229,176,0.25)":"rgba(255,92,138,0.25)"}`:"none"}}>
-          <div className="metric-label"><span style={{color:"var(--warn)"}}>₿</span> Crypto · Binance</div>
-          <div className="metric-value" style={{color:"var(--buy)"}}>{fmtB(cryptoBal)}</div>
-          <div className="metric-sub">USDT futures</div>
+          <div className="metric-label">Total Balance</div>
+          <div className="metric-value" style={{color:"var(--text)",fontSize:22}}>{fmtB(totalBal)}</div>
+          <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:3,fontFamily:"var(--font-mono)",fontSize:11}}>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              <span style={{color:"var(--text3)"}}><span style={{color:"var(--warn)"}}>₿</span> Crypto</span>
+              <span style={{color:"var(--buy)"}}>{fmtB(cryptoBal)}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between"}}>
+              <span style={{color:"var(--text3)"}}><span style={{color:"var(--lav)"}}>◆</span> Forex</span>
+              <span style={{color:"var(--lav-2)"}}>{fmtB(forexBal)}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",borderTop:"1px solid var(--border)",marginTop:3,paddingTop:3,fontWeight:700}}>
+              <span style={{color:"var(--text2)"}}>Total</span>
+              <span style={{color:"var(--text)"}}>{fmtB(totalBal)}</span>
+            </div>
+          </div>
         </div>
         <div className="metric">
-          <div className="metric-label"><span style={{color:"var(--lav)"}}>◆</span> Forex · MT5</div>
-          <div className="metric-value" style={{color:"var(--lav-2)"}}>{fmtB(forexBal)}</div>
-          <div className="metric-sub">IC Markets demo</div>
+          <div className="metric-label">Forex P&L</div>
+          <div className="metric-value" style={{color:forexPL>=0?"var(--buy)":"var(--sell)"}}>{forexPL>=0?"+":""}${Math.abs(forexPL).toFixed(2)}</div>
+          <div className="metric-sub">Capital.com demo</div>
         </div>
         <div className="metric">
           <div className="metric-label">Realized P&L</div>

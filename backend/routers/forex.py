@@ -31,16 +31,17 @@ def forex_status() -> Dict:
         levels = get_cached_levels()
         position_summary = get_forex_position_summary()
         
-        # MT5 account balance (separate from crypto)
+        # Capital.com account balance (separate from crypto)
         account = None
         try:
-            from modules.market_data_forex import get_account_info
-            account = get_account_info()
+            from modules.market_data_forex import get_capital_balance
+            account = get_capital_balance()
         except Exception as e:
             logger.warning(f"[forex-api] account info unavailable: {e}")
         
         return {
             'enabled': True,
+            'provider': 'capital.com',
             'kronos_available': is_kronos_available(),
             'pairs': FOREX_PAIRS,
             'biases': biases,
@@ -56,26 +57,24 @@ def forex_status() -> Dict:
 
 @router.get("/balance")
 def forex_balance() -> Dict:
-    """Get MT5 account balance/equity (separate from crypto balance)."""
+    """Get Capital.com account balance (separate from crypto balance)."""
     try:
         from config import FOREX_ENABLED
         if not FOREX_ENABLED:
-            return {'enabled': False, 'balance': 0.0, 'equity': 0.0}
-        from modules.market_data_forex import get_account_info
-        info = get_account_info()
-        if not info:
-            return {'enabled': True, 'balance': 0.0, 'equity': 0.0, 'connected': False}
-        return {'enabled': True, 'connected': True, **info}
+            return {'enabled': False, 'balance': 0.0, 'profit_loss': 0.0}
+        from modules.market_data_forex import get_capital_balance
+        info = get_capital_balance()
+        return {'enabled': True, **info}
     except Exception as e:
         logger.error(f"[forex-api] balance error: {e}")
-        return {'enabled': True, 'connected': False, 'balance': 0.0, 'equity': 0.0}
+        return {'enabled': True, 'connected': False, 'balance': 0.0, 'profit_loss': 0.0}
 
 
 @router.get("/test-connection")
 def forex_test_connection() -> Dict:
     """
-    Full MetaApi / MT5 connectivity test for the dashboard button.
-    Checks: env vars → token auth → account info → candle fetch.
+    Full Capital.com connectivity test for the dashboard button.
+    Checks: env vars → session login → account balance → candle fetch.
     """
     try:
         from modules.market_data_forex import test_connection

@@ -58,11 +58,11 @@ export default function Sidebar({tab,setTab,botStatus,open,onClose}){
           <div className="sidebar-balance-sub">USDT futures</div>
         </div>
         <div className="sidebar-balance">
-          <div className="sidebar-balance-label"><span style={{color:"var(--lav)"}}>◆</span> Forex · MT5</div>
+          <div className="sidebar-balance-label"><span style={{color:"var(--lav)"}}>◆</span> Forex · Capital</div>
           <div className="sidebar-balance-value" style={{color:"var(--lav-2)"}}>
             ${forexBal.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
           </div>
-          <div className="sidebar-balance-sub">IC Markets demo</div>
+          <div className="sidebar-balance-sub">Capital.com demo</div>
         </div>
 
         <div style={{display:"flex",gap:8,alignItems:"center"}}>

@@ -52,7 +52,7 @@ export default function Dashboard(){
     }catch{showToast("Close all failed","error");}
   };
   const ctx={botStatus,signals,trades,summary,portfolio,loading,actionLoad,lastUpdate,backendDown,handleStart,handleStop,handleScan,handleCloseTrade,handleClearTrades,handleCloseAll,refresh:load};
-  const TITLES={overview:["Dashboard","Portfolio overview & live signals"],signals:["Signals","Structure signals across all markets"],trades:["Trades","Full trade history & performance"],forex:["Forex & Metals","CRT + SMC + Kronos AI · MT5"],crypto:["Crypto","Kronos + CRT + SMC · Binance futures"]};
+  const TITLES={overview:["Dashboard","Portfolio overview & live signals"],signals:["Signals","Structure signals across all markets"],trades:["Trades","Full trade history & performance"],forex:["Forex & Metals","CRT + SMC + Kronos AI · Capital.com"],crypto:["Crypto","Kronos + CRT + SMC · Binance futures"]};
   const[title,subtitle]=TITLES[tab]||TITLES.overview;
   const isLive=botStatus?.running&&!botStatus?.paused;
   return(

@@ -41,7 +41,7 @@ export default function ForexTab(){
     <div className="glass" style={{padding:40,textAlign:"center"}}>
       <div style={{fontSize:40,marginBottom:12}}>◆</div>
       <div className="sec-title" style={{justifyContent:"center"}}>Forex Trading Disabled</div>
-      <div className="sec-sub" style={{marginTop:8}}>Set FOREX_ENABLED=true and add METAAPI_TOKEN + METAAPI_ACCOUNT_ID on Railway</div>
+      <div className="sec-sub" style={{marginTop:8}}>Set FOREX_ENABLED=true and add CAPITAL_API_KEY + CAPITAL_EMAIL + CAPITAL_PASSWORD on Railway</div>
     </div>
   );
 
@@ -54,7 +54,7 @@ export default function ForexTab(){
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap",position:"relative",zIndex:1}}>
           <div>
             <div className="hero-title">Forex & Metals <span className="accent">Trading</span></div>
-            <div className="hero-sub">CRT + SMC + Kronos AI · IC Markets via MetaApi</div>
+            <div className="hero-sub">CRT + SMC + Kronos AI · Capital.com</div>
           </div>
           <button className="btn btn-scan btn-sm" onClick={runTest} disabled={testing}>
             {testing?"Testing…":"⚡ Test Connection"}
@@ -76,14 +76,16 @@ export default function ForexTab(){
         {test&&(
           <div className={`info-box ${test.connected?"info-box-green":"info-box-red"}`} style={{marginTop:12,position:"relative",zIndex:1}}>
             <div style={{fontWeight:700,marginBottom:6}}>
-              {test.connected?"✓ MetaApi connected":"✕ Connection failed"}
+              {test.connected?"✓ Capital.com connected":"✕ Connection failed"}
             </div>
             <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:6,fontFamily:"var(--font-mono)",fontSize:10}}>
               <span>FOREX_ENABLED: <b>{String(test.forex_enabled)}</b></span>
-              <span>Token set: <b>{String(test.token_set)}</b></span>
-              <span>Account ID set: <b>{String(test.account_id_set)}</b></span>
+              <span>Environment: <b>{test.environment||"—"}</b></span>
+              <span>API key set: <b>{String(test.api_key_set)}</b></span>
+              <span>Email set: <b>{String(test.email_set)}</b></span>
+              <span>Password set: <b>{String(test.password_set)}</b></span>
               {test.account&&<span>Balance: <b>${test.account.balance?.toFixed(2)}</b></span>}
-              {test.account&&<span>Equity: <b>${test.account.equity?.toFixed(2)}</b></span>}
+              {test.account&&<span>P&L: <b>${test.account.profit_loss?.toFixed(2)}</b></span>}
               {test.account&&<span>Currency: <b>{test.account.currency}</b></span>}
               {test.symbols_ok?.length>0&&<span>Symbols OK: <b>{test.symbols_ok.join(", ")}</b></span>}
               {test.symbols_failed?.length>0&&<span>Symbols failed: <b>{test.symbols_failed.join(", ")}</b></span>}
@@ -95,11 +97,11 @@ export default function ForexTab(){
 
       <div className="metric-grid">
         <div className="metric">
-          <div className="metric-label"><span style={{color:"var(--lav)"}}>◆</span> MT5 Balance</div>
+          <div className="metric-label"><span style={{color:"var(--lav)"}}>◆</span> Forex Balance</div>
           <div className="metric-value" style={{color:"var(--lav-2)"}}>
             ${(account?.balance||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
           </div>
-          <div className="metric-sub">{account?.currency||"USD"} · IC Markets demo</div>
+          <div className="metric-sub">{account?.currency||"USD"} · Capital.com demo</div>
         </div>
         <div className="metric">
           <div className="metric-label">Equity</div>
