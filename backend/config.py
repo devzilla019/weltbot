@@ -7,6 +7,18 @@ Robust parsing: env values are sanitized so stray comments/units
 """
 import os
 import re
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    def load_dotenv(*args, **kwargs):
+        return False
+
+BASE_DIR = Path(__file__).resolve().parent
+for _env_path in (BASE_DIR / ".env", BASE_DIR.parent / ".env"):
+    if _env_path.exists():
+        load_dotenv(_env_path, override=False)
 
 
 def _clean(raw: str) -> str:

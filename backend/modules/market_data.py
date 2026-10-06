@@ -64,27 +64,41 @@ def get_balance() -> float:
     now = time.time()
     if _cached_balance > 0 and (now - _balance_ts) < 60:
         return _cached_balance
+
     for attempt in range(3):
         try:
             params = _sign({})
-            resp   = requests.get(
+            resp = requests.get(
                 f"{EXEC_URL}/fapi/v2/balance",
-                params=params, headers=_get_headers(), timeout=15,
+                params=params,
+                headers=_get_headers(),
+                timeout=15,
             )
+
+            if resp.status_code == 404:
+                print(f"[market_data] balance endpoint 404 on {EXEC_URL}; returning cached={_cached_balance}")
+                return _cached_balance
+
             data = resp.json()
             if isinstance(data, list):
                 for b in data:
                     if b.get("asset") == "USDT":
-                        val = float(b.get("availableBalance", 0))
+                        val = float(b.get("availableBalance", 0) or 0)
                         if val == 0:
-                            val = float(b.get("walletBalance", 0))
+                            val = float(b.get("walletBalance", 0) or 0)
                         if val > 0:
                             _cached_balance = val
-                            _balance_ts     = now
+                            _balance_ts = now
                             return val
+
+            if isinstance(data, dict) and data.get("code") == -1121:
+                print(f"[market_data] invalid symbol / no data for futures balance on {EXEC_URL}")
+                break
+
         except Exception as e:
             print(f"[market_data] balance error (attempt {attempt+1}): {e}")
             time.sleep(2)
+
     return _cached_balance
 
 def get_asset_balance(asset: str) -> float:

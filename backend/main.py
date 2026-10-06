@@ -40,6 +40,14 @@ _last_scan_log  = []
 _active_setups: dict = {}
 _forex_active_setups: dict = {}
 
+# Re-entrancy guards — prevent overlapping runs of the 60s entry checks
+_job_locks = {
+    "crypto_entry": threading.Lock(),
+    "forex_entry":  threading.Lock(),
+    "crypto_crt":   threading.Lock(),
+    "forex_crt":    threading.Lock(),
+}
+
 
 def _get_bot_state(db):
     state = db.query(BotState).first()
@@ -280,6 +288,11 @@ def run_crt_scan():
     if not FOREX_ENABLED:
         return
 
+    lock = _job_locks["forex_crt"]
+    if not lock.acquire(blocking=False):
+        print("[crt] previous scan still active — skipping")
+        return
+
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -322,6 +335,7 @@ def run_crt_scan():
         print(f"[crt] scan cycle error: {e}")
     finally:
         db.close()
+        lock.release()
 
 
 def run_forex_entry_check():
@@ -329,7 +343,12 @@ def run_forex_entry_check():
     global _forex_active_setups
     if not _forex_active_setups:
         return
-    
+
+    lock = _job_locks["forex_entry"]
+    if not lock.acquire(blocking=False):
+        print("[forex-entry] previous run still active — skipping")
+        return
+
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -403,6 +422,7 @@ def run_forex_entry_check():
         print(f"[forex-entry] cycle error: {e}")
     finally:
         db.close()
+        lock.release()
 
 
 def run_forex_position_monitor():
@@ -453,6 +473,10 @@ def run_crypto_kronos_bias():
 
 def run_crypto_crt_scan():
     """Detect CRT setups on crypto symbols and validate with Kronos."""
+    lock = _job_locks["crypto_crt"]
+    if not lock.acquire(blocking=False):
+        print("[crypto-crt] previous scan still active — skipping")
+        return
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -472,10 +496,15 @@ def run_crypto_crt_scan():
         print(f"[crypto-crt] cycle error: {e}")
     finally:
         db.close()
+        lock.release()
 
 
 def run_crypto_entry_check():
     """Check SMC entries on active crypto CRT setups and place orders."""
+    lock = _job_locks["crypto_entry"]
+    if not lock.acquire(blocking=False):
+        print("[crypto-entry] previous run still active — skipping")
+        return
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -544,6 +573,7 @@ def run_crypto_entry_check():
         print(f"[crypto-entry] cycle error: {e}")
     finally:
         db.close()
+        lock.release()
 
 
 def _keep_alive():
@@ -578,24 +608,27 @@ def _scanner_watchdog():
             db.close()
 
 scheduler = BackgroundScheduler()
+
+# Shared job options — never pile up overlapping runs
+_JOB_OPTS = dict(max_instances=1, coalesce=True, misfire_grace_time=30)
+
 # Crypto jobs
-scheduler.add_job(check_positions,      "interval", minutes=2)
-scheduler.add_job(level2_entry_check,   "interval", seconds=60,
-                  max_instances=3, coalesce=True, misfire_grace_time=30)
-scheduler.add_job(level1_bos_scan,      "interval", minutes=SCAN_INTERVAL_MIN)
-scheduler.add_job(refresh_signal_cache, "interval", minutes=10)
+scheduler.add_job(check_positions,      "interval", minutes=2, **_JOB_OPTS)
+scheduler.add_job(level2_entry_check,   "interval", seconds=60, **_JOB_OPTS)
+scheduler.add_job(level1_bos_scan,      "interval", minutes=SCAN_INTERVAL_MIN, **_JOB_OPTS)
+scheduler.add_job(refresh_signal_cache, "interval", minutes=10, **_JOB_OPTS)
 
 # Forex jobs
-scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15)
-scheduler.add_job(run_crt_scan,               "interval", minutes=15)
-scheduler.add_job(run_forex_entry_check,      "interval", seconds=60)
-scheduler.add_job(run_forex_position_monitor, "interval", minutes=2)
-scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1)  # 00:01 UTC
+scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15, **_JOB_OPTS)
+scheduler.add_job(run_crt_scan,               "interval", minutes=15, **_JOB_OPTS)
+scheduler.add_job(run_forex_entry_check,      "interval", seconds=60, **_JOB_OPTS)
+scheduler.add_job(run_forex_position_monitor, "interval", minutes=2, **_JOB_OPTS)
+scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1, **_JOB_OPTS)
 
 # Crypto jobs — same 3-layer strategy (Kronos + CRT + SMC)
-scheduler.add_job(run_crypto_kronos_bias,     "interval", minutes=15)
-scheduler.add_job(run_crypto_crt_scan,        "interval", minutes=15)
-scheduler.add_job(run_crypto_entry_check,     "interval", seconds=60)
+scheduler.add_job(run_crypto_kronos_bias,     "interval", minutes=15, **_JOB_OPTS)
+scheduler.add_job(run_crypto_crt_scan,        "interval", minutes=15, **_JOB_OPTS)
+scheduler.add_job(run_crypto_entry_check,     "interval", seconds=60, **_JOB_OPTS)
 
 scheduler.start()
 
