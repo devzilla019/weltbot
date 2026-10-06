@@ -148,10 +148,45 @@ def sync_exchange_positions():
     finally:
         db.close()
 
+# Tracks which symbols we've already logged a cooldown message for, keyed by
+# the cooldown window (the SL trade's closed_at). Prevents the 60s entry check
+# from spamming the same "blocked: SL cooldown" line every cycle.
+_cooldown_log_cache: dict = {}
+
+
 def can_reenter(symbol, db):
     cutoff = datetime.utcnow() - timedelta(hours=SL_COOLDOWN_HOURS)
     sl = db.query(Trade).filter(Trade.asset==symbol, Trade.outcome=="LOSS", Trade.closed_at>=cutoff).first()
     return (False, f"SL cooldown {symbol}") if sl else (True, "ok")
+
+
+def cooldown_log_once(symbol, db) -> bool:
+    """
+    Return True only the first time we see a symbol in SL cooldown for the
+    current window. Subsequent calls within the same window return False so
+    the caller can skip logging.
+    """
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=SL_COOLDOWN_HOURS)
+        sl = db.query(Trade).filter(
+            Trade.asset == symbol,
+            Trade.outcome == "LOSS",
+            Trade.closed_at >= cutoff,
+        ).order_by(Trade.closed_at.desc()).first()
+
+        if not sl:
+            _cooldown_log_cache.pop(symbol, None)
+            return False
+
+        # Key the window by the SL trade's close time
+        window_key = sl.closed_at.isoformat() if sl.closed_at else "unknown"
+        if _cooldown_log_cache.get(symbol) == window_key:
+            return False
+
+        _cooldown_log_cache[symbol] = window_key
+        return True
+    except Exception:
+        return True
 
 def daily_drawdown_check():
     db = SessionLocal()

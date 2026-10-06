@@ -154,6 +154,20 @@ def can_open_forex_trade(symbol: str) -> Tuple[bool, str]:
         return False, "Check failed"
 
 
+# Tracks which (symbol, reason) pairs we've already logged, so the 60s entry
+# check doesn't spam the same "blocked" line every cycle.
+_forex_block_log_cache: dict = {}
+
+
+def forex_block_log_once(symbol: str, reason: str) -> bool:
+    """Return True only the first time we see this symbol+reason combination."""
+    key = f"{symbol}:{reason}"
+    if _forex_block_log_cache.get(symbol) == key:
+        return False
+    _forex_block_log_cache[symbol] = key
+    return True
+
+
 # ── History ───────────────────────────────────────────────────────────────────
 
 def get_forex_trade_history(limit: int = 50) -> List[Dict]:

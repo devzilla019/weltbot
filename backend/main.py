@@ -71,14 +71,15 @@ def _place_trade(sig: dict, balance: float, db) -> bool:
     global _last_scan_log
     from modules.risk_manager     import calculate_risk
     from modules.executor         import place_order
-    from modules.position_manager import can_reenter
+    from modules.position_manager import can_reenter, cooldown_log_once
 
     symbol = sig["symbol"]
     signal = sig["signal"]
 
     allowed, reason = can_reenter(symbol, db)
     if not allowed:
-        print(f"[bot] {symbol} blocked: {reason}")
+        if cooldown_log_once(symbol, db):
+            print(f"[bot] {symbol} blocked: {reason}")
         return False
 
     atr  = sig["market"].get("atr", 0)
@@ -358,7 +359,7 @@ def run_forex_entry_check():
         from modules.market_data_forex import get_candles, get_current_price
         from modules.forex_signal_engine import check_entry_condition, confirm_on_timeframe
         from modules.forex_executor import place_forex_order
-        from modules.forex_position_manager import can_open_forex_trade
+        from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
         from modules.kronos_engine import get_cached_bias
         from modules.crt_detector import get_cascade
 
@@ -372,7 +373,8 @@ def run_forex_entry_check():
 
                 allowed, reason = can_open_forex_trade(symbol)
                 if not allowed:
-                    print(f"[forex-entry] {symbol} blocked: {reason}")
+                    if forex_block_log_once(symbol, reason):
+                        print(f"[forex-entry] {symbol} blocked: {reason}")
                     continue
 
                 # ── CASCADE STEP 2: confirm a POI on the mid timeframe ────────
@@ -512,7 +514,7 @@ def run_crypto_entry_check():
             return
 
         from modules.crypto_strategy import get_crypto_setups, check_crypto_entry, clear_crypto_setup
-        from modules.position_manager import can_reenter
+        from modules.position_manager import can_reenter, cooldown_log_once
         from modules.risk_manager import calculate_risk_with_compounding
         from modules.executor import place_order
         from modules.market_data import get_balance, get_ticker_price
@@ -535,7 +537,8 @@ def run_crypto_entry_check():
             try:
                 allowed, reason = can_reenter(symbol, db)
                 if not allowed:
-                    print(f"[crypto-entry] {symbol} blocked: {reason}")
+                    if cooldown_log_once(symbol, db):
+                        print(f"[crypto-entry] {symbol} blocked: {reason}")
                     continue
 
                 sig = check_crypto_entry(symbol)
