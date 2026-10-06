@@ -5,6 +5,7 @@ Kronos AI forecasting engine for directional bias
 import os
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 import logging
