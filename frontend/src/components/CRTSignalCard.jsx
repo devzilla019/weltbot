@@ -1,6 +1,15 @@
 import{useState,useEffect}from"react";
 import{forexApi}from"../api";
 
+// Human-readable labels for the POI kinds the backend returns
+const POI_LABELS={
+  order_block:"Order Block",
+  breaker_block:"Breaker Block",
+  fvg:"FVG",
+  support_resistance:"S&R",
+};
+const poiLabel=k=>POI_LABELS[k]||(k?String(k).replace(/_/g," "):"—");
+
 export default function CRTSignalCard({symbol,bias,levels}){
   const[price,setPrice]=useState(null);
   const[details,setDetails]=useState(null);
@@ -78,16 +87,21 @@ export default function CRTSignalCard({symbol,bias,levels}){
             CASCADE · {setup.direction}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:4,fontFamily:"var(--font-mono)",fontSize:9,flexWrap:"wrap"}}>
-            <span className="chip chip-live" style={{fontSize:8,padding:"1px 6px"}}>CRT {setup.timeframe?.toUpperCase()}</span>
+            <span className="chip chip-live" style={{fontSize:8,padding:"1px 6px"}}>CRT {setup.timeframe?.toUpperCase()||"—"}</span>
             <span style={{color:"var(--text3)"}}>›</span>
             <span className={`chip ${setup.poi?"chip-bull":"chip-wait"}`} style={{fontSize:8,padding:"1px 6px"}}>
-              {setup.confirm_timeframe?.toUpperCase()||"?"} {setup.poi?`✓ ${setup.poi}`:"…"}
+              {setup.confirm_timeframe?.toUpperCase()||"—"} {setup.poi?`✓ ${poiLabel(setup.poi)}`:"· scanning"}
             </span>
             <span style={{color:"var(--text3)"}}>›</span>
-            <span className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>ENTRY {setup.entry_timeframe?.toUpperCase()||"?"}</span>
+            <span className="chip chip-neutral" style={{fontSize:8,padding:"1px 6px"}}>ENTRY {setup.entry_timeframe?.toUpperCase()||"—"}</span>
           </div>
           <div style={{fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",marginTop:4}}>
             {setup.sweep_type} swept · target {setup.target!=null?Number(setup.target).toFixed(5):"—"}
+          </div>
+          <div style={{fontFamily:"var(--font-mono)",fontSize:9,marginTop:3,color:setup.poi?"var(--buy)":"var(--warn)"}}>
+            {setup.poi
+              ? `POI confirmed: ${poiLabel(setup.poi)} on ${setup.confirm_timeframe?.toUpperCase()}`
+              : `Waiting for POI on ${setup.confirm_timeframe?.toUpperCase()} (OB / breaker / FVG / S&R)`}
           </div>
         </div>
       )}

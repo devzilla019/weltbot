@@ -300,7 +300,7 @@ def run_crt_scan():
         if not state.is_running or state.paused:
             return
 
-        from modules.crt_detector import scan_symbol, validate_with_kronos, store_crt_level, CRT_TIMEFRAMES
+        from modules.crt_detector import scan_symbol, validate_with_kronos, store_crt_level, CRT_TIMEFRAMES, get_cascade
         from modules.kronos_engine import get_cached_bias
         from config import FOREX_PAIRS
 
@@ -322,10 +322,20 @@ def run_crt_scan():
                 for sweep in setups:
                     if not validate_with_kronos(sweep, bias):
                         continue
+
+                    # Attach the cascade plan immediately so the UI can show
+                    # the full chain (CRT -> confirm -> entry) from the start.
+                    cascade = get_cascade(sweep["timeframe"])
+                    sweep["confirm_timeframe"] = cascade["confirm"]
+                    sweep["entry_timeframe"] = cascade["entry"]
+                    sweep["poi"] = None
+                    sweep["poi_status"] = "waiting"
+
                     _forex_active_setups[symbol] = sweep
                     store_crt_level(sweep)
                     print(f"[crt] {symbol} {sweep['timeframe']} setup confirmed — "
-                          f"{sweep['direction']} target={sweep['target']:.5f}")
+                          f"{sweep['direction']} target={sweep['target']:.5f} "
+                          f"(confirm {cascade['confirm']} → entry {cascade['entry']})")
                     break
 
             except Exception as e:
@@ -381,11 +391,16 @@ def run_forex_entry_check():
                 poi = confirm_on_timeframe(setup, confirm_tf)
                 if not poi:
                     # No POI yet — keep the setup alive and wait
+                    setup['confirm_timeframe'] = confirm_tf
+                    setup['entry_timeframe'] = entry_tf
+                    setup['poi'] = None
+                    setup['poi_status'] = 'waiting'
                     continue
 
                 setup['confirm_timeframe'] = confirm_tf
                 setup['entry_timeframe'] = entry_tf
-                setup['poi'] = poi
+                setup['poi'] = poi.get('kind')
+                setup['poi_status'] = 'confirmed'
 
                 # ── CASCADE STEP 3: SMC entry on the lower timeframe ──────────
                 price = get_current_price(symbol)

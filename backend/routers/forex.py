@@ -341,6 +341,9 @@ def forex_pair_detail(symbol: str) -> Dict:
             from main import _forex_active_setups
             s = _forex_active_setups.get(symbol)
             if s:
+                poi = s.get('poi')
+                if isinstance(poi, dict):
+                    poi = poi.get('kind')
                 active_setup = {
                     'timeframe': s.get('timeframe'),
                     'sweep_type': s.get('sweep_type'),
@@ -348,7 +351,8 @@ def forex_pair_detail(symbol: str) -> Dict:
                     'target': s.get('target'),
                     'confirm_timeframe': s.get('confirm_timeframe'),
                     'entry_timeframe': s.get('entry_timeframe'),
-                    'poi': (s.get('poi') or {}).get('kind'),
+                    'poi': poi,
+                    'poi_status': s.get('poi_status', 'waiting'),
                 }
         except Exception:
             pass
