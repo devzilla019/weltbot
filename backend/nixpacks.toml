@@ -13,10 +13,11 @@ cmds = [
 
 [phases.build]
 cmds = [
-  # Clone Kronos model repo into the backend dir so `from model import ...` works.
-  # The app also auto-clones at runtime if this step is skipped.
-  "test -d Kronos || git clone --depth 1 https://github.com/shiyu-coder/Kronos.git Kronos || true",
-  "test -d Kronos/model && echo '[build] Kronos repo ready' || echo '[build] WARNING: Kronos clone missing — runtime auto-clone will retry'",
+  # Fetch the Kronos model repo into the backend dir so `from model import ...` works.
+  # Uses the GitHub tarball (no `git` binary required). The app also downloads
+  # it at runtime if this step is skipped.
+  "test -d Kronos/model || (curl -sL https://codeload.github.com/shiyu-coder/Kronos/tar.gz/refs/heads/master -o /tmp/kronos.tgz && mkdir -p Kronos && tar -xzf /tmp/kronos.tgz -C Kronos --strip-components=1) || true",
+  "test -d Kronos/model && echo '[build] Kronos repo ready' || echo '[build] WARNING: Kronos missing — runtime download will retry'",
 ]
 
 [start]

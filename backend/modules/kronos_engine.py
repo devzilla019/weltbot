@@ -17,7 +17,18 @@ _kronos_predictor = None
 _kronos_bias_cache: Dict[str, dict] = {}
 _kronos_status: Dict[str, object] = {"state": "not_started", "error": None, "repo": None}
 
+# Once loading fails permanently (e.g. no `git` in the container), stop
+# retrying on every prediction call — otherwise the logs fill with the same
+# error every 15 minutes.
+_kronos_load_failed = False
+
 KRONOS_REPO_URL = "https://github.com/shiyu-coder/Kronos.git"
+
+
+def _git_available() -> bool:
+    """Check whether the `git` binary exists in this container."""
+    import shutil
+    return shutil.which("git") is not None
 
 
 def _candidate_repo_paths():
@@ -53,31 +64,110 @@ def _ensure_kronos_repo() -> Optional[str]:
                 sys.path.insert(0, path)
             return path
 
-    # 3) Clone it now
     target = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Kronos")
-    try:
-        import subprocess
-        logger.info(f"[kronos] repo not found — cloning into {target}")
-        subprocess.run(
-            ["git", "clone", "--depth", "1", KRONOS_REPO_URL, target],
-            check=True, capture_output=True, timeout=180,
-        )
-        if os.path.exists(os.path.join(target, "model")):
-            if target not in sys.path:
-                sys.path.insert(0, target)
-            logger.info("[kronos] clone complete")
-            return target
-    except Exception as e:
-        logger.error(f"[kronos] auto-clone failed: {e}")
+
+    # 3a) Preferred: download the repo tarball (works without `git`)
+    if _download_kronos_tarball(target):
+        if target not in sys.path:
+            sys.path.insert(0, target)
+        return target
+
+    # 3b) Fallback: git clone (only if `git` exists)
+    if _git_available():
+        try:
+            import subprocess
+            logger.info(f"[kronos] tarball failed — trying git clone into {target}")
+            subprocess.run(
+                ["git", "clone", "--depth", "1", KRONOS_REPO_URL, target],
+                check=True, capture_output=True, timeout=180,
+            )
+            if os.path.exists(os.path.join(target, "model")):
+                if target not in sys.path:
+                    sys.path.insert(0, target)
+                logger.info("[kronos] git clone complete")
+                return target
+        except Exception as e:
+            logger.error(f"[kronos] git clone failed: {e}")
+    else:
+        logger.warning("[kronos] `git` not available in this container")
 
     return None
 
 
+def _download_kronos_tarball(target: str) -> bool:
+    """
+    Download the Kronos repo as a GitHub tarball and extract it into `target`.
+    Requires no `git` binary — works on any container (Railway/Railpack, etc.).
+    Uses `requests` with retries for robustness against flaky networks.
+    """
+    import io
+    import tarfile
+    import time as _time
+
+    # NOTE: the Kronos repo's default branch is `master` (not `main`).
+    tarball_urls = [
+        "https://codeload.github.com/shiyu-coder/Kronos/tar.gz/refs/heads/master",
+        "https://codeload.github.com/shiyu-coder/Kronos/tar.gz/refs/heads/main",
+    ]
+
+    for url in tarball_urls:
+        for attempt in range(3):
+            try:
+                logger.info(f"[kronos] downloading repo tarball from {url} (attempt {attempt+1})")
+                resp = requests.get(
+                    url,
+                    headers={"User-Agent": "WeltBot/1.0"},
+                    timeout=180,
+                    stream=True,
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[kronos] tarball HTTP {resp.status_code} from {url}")
+                    break
+
+                # Read the full body (streamed) — more reliable than urllib chunked reads
+                raw = resp.content
+
+                with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tar:
+                    members = tar.getmembers()
+                    if not members:
+                        break
+
+                    os.makedirs(target, exist_ok=True)
+                    for m in members:
+                        # strip the leading "Kronos-master/" component
+                        parts = m.name.split("/", 1)
+                        if len(parts) < 2 or not parts[1]:
+                            continue
+                        m.name = parts[1]
+                        try:
+                            tar.extract(m, target, filter="data")
+                        except TypeError:
+                            # Python < 3.12 has no `filter` kwarg
+                            tar.extract(m, target)
+
+                if os.path.exists(os.path.join(target, "model")):
+                    logger.info("[kronos] tarball extracted successfully")
+                    return True
+
+                logger.warning("[kronos] tarball extracted but no `model` package found")
+                break
+
+            except Exception as e:
+                logger.error(f"[kronos] tarball download failed ({url}, attempt {attempt+1}): {e}")
+                _time.sleep(3)
+
+    return False
+
+
 def _load_kronos_model():
     """Load Kronos model once at startup"""
-    global _kronos_model, _kronos_tokenizer, _kronos_predictor, _kronos_status
+    global _kronos_model, _kronos_tokenizer, _kronos_predictor, _kronos_status, _kronos_load_failed
 
     if _kronos_model is not None:
+        return
+
+    # Already failed permanently — don't retry or re-log
+    if _kronos_load_failed:
         return
 
     from config import KRONOS_ENABLED, KRONOS_MODEL_PATH, KRONOS_TOKENIZER
@@ -100,7 +190,8 @@ def _load_kronos_model():
                          "Ensure `git` is available and the build can reach GitHub.",
                 "repo": None,
             }
-            logger.error(f"[kronos] {_kronos_status['error']}")
+            _kronos_load_failed = True   # latch — stop retrying
+            logger.error(f"[kronos] {_kronos_status['error']} (will not retry)")
             return
 
         from model import Kronos, KronosTokenizer, KronosPredictor
@@ -123,7 +214,8 @@ def _load_kronos_model():
         logger.info("[kronos] model loaded successfully (CPU mode)")
     except Exception as e:
         _kronos_status = {"state": "error", "error": str(e), "repo": None}
-        logger.error(f"[kronos] failed to load model: {e}")
+        _kronos_load_failed = True   # latch — stop retrying
+        logger.error(f"[kronos] failed to load model: {e} (will not retry)")
         _kronos_model = None
         _kronos_tokenizer = None
         _kronos_predictor = None
@@ -160,7 +252,7 @@ def predict_bias(symbol: str, ohlcv_df: pd.DataFrame) -> Optional[dict]:
     if _kronos_predictor is None:
         _load_kronos_model()
         if _kronos_predictor is None:
-            return None
+            return None   # load failed (latched) — silently skip
     
     try:
         if len(ohlcv_df) < 400:

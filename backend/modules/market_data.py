@@ -247,60 +247,70 @@ def get_ticker_price(symbol: str) -> float:
 
 _lot_cache: dict = {}
 
+# Fallback rules — used ONLY if the exchange info request fails.
+# The live exchangeInfo values always take priority (they are authoritative).
+_FALLBACK_RULES = {
+    "BTCUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
+    "ETHUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
+    "BNBUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+    "SOLUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+    "XRPUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+    "ADAUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+    "DOGEUSDT": {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+    "AVAXUSDT": {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
+    "LINKUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+    "UNIUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+    "LTCUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+    "ATOMUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+    "NEARUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+    "DOTUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
+    "AAVEUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
+}
+
+_exchange_info_cache: dict = {}
+
+
+def _fetch_exchange_rules(sym: str) -> dict | None:
+    """Fetch LOT_SIZE + NOTIONAL filters for one symbol from exchangeInfo."""
+    try:
+        resp = requests.get(f"{MARKET_DATA_URL}/fapi/v1/exchangeInfo", timeout=10)
+        if resp.status_code != 200:
+            return None
+        for s in resp.json().get("symbols", []):
+            if s["symbol"] != sym:
+                continue
+            rules = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
+            for f in s.get("filters", []):
+                if f["filterType"] == "LOT_SIZE":
+                    rules["min_qty"]   = float(f["minQty"])
+                    rules["step_size"] = float(f["stepSize"])
+                if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
+                    rules["min_notional"] = float(f.get("notional", f.get("minNotional", 5.0)))
+            return rules
+    except Exception as e:
+        print(f"[market_data] exchangeInfo fetch error {sym}: {e}")
+    return None
+
+
 def get_lot_size_rules(symbol: str) -> dict:
+    """
+    Return {min_qty, step_size, min_notional} for a symbol.
+
+    Priority: live exchangeInfo (authoritative) -> hardcoded fallback.
+    This prevents 'Precision is over the maximum' errors when the exchange
+    changes a symbol's step size (e.g. AVAX requires whole numbers).
+    """
     sym = symbol.replace("/", "")
     if sym in _lot_cache:
         return _lot_cache[sym]
 
-    # Hardcoded futures precision rules for common assets
-    # AAVE, LINK, UNI etc require whole number quantities on futures
-    KNOWN_RULES = {
-        "BTCUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
-        "ETHUSDT":  {"min_qty": 0.001,  "step_size": 0.001,  "min_notional": 5.0},
-        "BNBUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
-        "SOLUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "XRPUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
-        "ADAUSDT":  {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
-        "DOGEUSDT": {"min_qty": 1.0,    "step_size": 1.0,    "min_notional": 5.0},
-        "AVAXUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "LINKUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "UNIUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "LTCUSDT":  {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
-        "ATOMUSDT": {"min_qty": 0.01,   "step_size": 0.01,   "min_notional": 5.0},
-        "NEARUSDT": {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "DOTUSDT":  {"min_qty": 0.1,    "step_size": 0.1,    "min_notional": 5.0},
-        "AAVEUSDT": {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0},
-    }
+    rules = _fetch_exchange_rules(sym)
+    if rules is None:
+        rules = _FALLBACK_RULES.get(sym, {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0})
+        print(f"[market_data] using fallback lot rules for {sym}: {rules}")
 
-    if sym in KNOWN_RULES:
-        _lot_cache[sym] = KNOWN_RULES[sym]
-        return KNOWN_RULES[sym]
-
-    # Try fetching from exchange info
-    try:
-        resp = requests.get(
-            f"{MARKET_DATA_URL}/fapi/v1/exchangeInfo",
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            for s in data.get("symbols", []):
-                if s["symbol"] == sym:
-                    rules = {"min_qty": 0.001, "step_size": 0.001, "min_notional": 5.0}
-                    for f in s.get("filters", []):
-                        if f["filterType"] == "LOT_SIZE":
-                            rules["min_qty"]   = float(f["minQty"])
-                            rules["step_size"] = float(f["stepSize"])
-                        if f["filterType"] in ("MIN_NOTIONAL", "NOTIONAL"):
-                            rules["min_notional"] = float(f.get("notional", f.get("minNotional", 5.0)))
-                    _lot_cache[sym] = rules
-                    return rules
-    except Exception as e:
-        print(f"[market_data] lot size fetch error {symbol}: {e}")
-
-    default = {"min_qty": 0.01, "step_size": 0.01, "min_notional": 5.0}
-    _lot_cache[sym] = default
-    return default
+    _lot_cache[sym] = rules
+    return rules
 
 
 def round_step_size(quantity: float, step_size: float) -> float:

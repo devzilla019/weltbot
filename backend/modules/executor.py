@@ -88,16 +88,24 @@ def place_order(symbol: str, signal: str, position_units: float,
         except Exception as e:
             print(f"[executor] leverage set error: {e}")
 
-        # Fix quantity precision
+        # Fix quantity precision — use the exchange's authoritative step size
         sym_clean = symbol.replace("/", "")
-        rules     = KNOWN_RULES.get(sym_clean, {"step": 0.001, "min_notional": 5.0})
-        qty       = risk["position_size_units"]
-        qty       = _round_step(qty, rules["step"])
+        try:
+            from modules.market_data import get_lot_size_rules
+            live = get_lot_size_rules(symbol)
+            step = live.get("step_size", 0.001)
+            min_notional = live.get("min_notional", 5.0)
+        except Exception:
+            step = KNOWN_RULES.get(sym_clean, {"step": 0.001})["step"]
+            min_notional = 5.0
+
+        qty = risk["position_size_units"]
+        qty = _round_step(qty, step)
 
         # Ensure minimum notional
-        if qty * price < rules["min_notional"]:
-            qty = math.ceil(rules["min_notional"] / price / rules["step"]) * rules["step"]
-            qty = _round_step(qty, rules["step"])
+        if qty * price < min_notional:
+            qty = math.ceil(min_notional / price / step) * step
+            qty = _round_step(qty, step)
 
         if qty <= 0:
             return {"success": False, "error": f"Quantity too small: {qty}"}
