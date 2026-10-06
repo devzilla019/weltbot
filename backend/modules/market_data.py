@@ -108,12 +108,32 @@ def get_asset_balance(asset: str) -> float:
 
 # ─── MARKET DATA (mainnet public) ─────────────────────────────────────────────
 
+# Short-lived OHLCV cache — the entry checks run every 60s and would otherwise
+# re-fetch the same candles for every symbol on every cycle (slow + rate limits).
+_ohlcv_cache: dict = {}
+_OHLCV_TTL = 45  # seconds
+
+
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
     """
     Fetch OHLCV using multiple providers with fallback.
     Priority: Binance direct → Binance mirrors → CoinGecko
     CoinGecko works from ALL cloud servers with no IP restrictions.
+    Results are cached for 45s to keep the 60s entry checks fast.
     """
+    import time as _t
+    cache_key = f"{symbol}:{interval}:{limit}"
+    cached = _ohlcv_cache.get(cache_key)
+    if cached and (_t.time() - cached[0]) < _OHLCV_TTL:
+        return cached[1].copy()
+
+    df = _fetch_ohlcv_uncached(symbol, interval, limit)
+    if df is not None and not df.empty:
+        _ohlcv_cache[cache_key] = (_t.time(), df)
+    return df
+
+
+def _fetch_ohlcv_uncached(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
     sym = symbol.replace("/", "")
 
     # All Binance mirrors to try
@@ -192,7 +212,23 @@ def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFr
     return pd.DataFrame()
 
 
+_price_cache: dict = {}
+_PRICE_TTL = 20  # seconds
+
+
 def get_ticker_price(symbol: str) -> float:
+    import time as _t
+    cached = _price_cache.get(symbol)
+    if cached and (_t.time() - cached[0]) < _PRICE_TTL:
+        return cached[1]
+
+    price = _get_ticker_price_uncached(symbol)
+    if price > 0:
+        _price_cache[symbol] = (_t.time(), price)
+    return price
+
+
+def _get_ticker_price_uncached(symbol: str) -> float:
     sym = symbol.replace("/", "")
 
     # Try Binance mirrors first

@@ -46,6 +46,7 @@ _job_locks = {
     "forex_entry":  threading.Lock(),
     "crypto_crt":   threading.Lock(),
     "forex_crt":    threading.Lock(),
+    "level1":       threading.Lock(),
 }
 
 
@@ -114,6 +115,10 @@ def _place_trade(sig: dict, balance: float, db) -> bool:
 
 def level1_bos_scan():
     global _active_setups
+    lock = _job_locks["level1"]
+    if not lock.acquire(blocking=False):
+        print("[L1] previous scan still active — skipping")
+        return
     db = SessionLocal()
     try:
         state = _get_bot_state(db)
@@ -162,6 +167,7 @@ def level1_bos_scan():
         print(f"[L1] cycle error: {e}")
     finally:
         db.close()
+        lock.release()
 
 
 def level2_entry_check():
