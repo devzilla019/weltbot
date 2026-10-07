@@ -189,10 +189,18 @@ export default function ForexTab(){
                   <span style={{color:"var(--sell)"}}>SL {p.sl?.toFixed(5)}</span>
                   <span style={{color:"var(--buy)"}}>TP {p.tp?.toFixed(5)}</span>
                 </div>
+                {(p.tp1!=null||p.tp2!=null)&&(
+                  <div className="range-labels" style={{marginTop:4}}>
+                    <span style={{color:"var(--warn)"}}>TP1 {p.tp1?.toFixed(5)??"—"}</span>
+                    <span style={{color:"var(--buy)"}}>TP2 {(p.tp2??p.tp)?.toFixed(5)??"—"}</span>
+                  </div>
+                )}
                 <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
                   <span className="chip chip-live">{p.lots} lots</span>
                   <span className="chip chip-neutral">{p.confidence}%</span>
                   <span className="chip chip-neutral">{p.kronos_bias}</span>
+                  {p.entry_type&&<span className="chip chip-bull">{p.entry_type}</span>}
+                  {p.partial_tp_hit&&<span className="chip chip-bull">50% closed</span>}
                 </div>
               </div>
             ))}

@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 def check_forex_positions() -> None:
     """
     Fetch open Capital.com positions and reconcile with the ForexTrade table.
-    Trades no longer open on the broker (SL/TP hit) are marked WIN/LOSS.
+
+    Also applies the refined-CRT partial take-profit rule: once price reaches
+    TP1, close 50% of the position, move the stop to breakeven, and mark the
+    trade as partially closed.
+
+    Trades no longer open on the broker (SL/TP hit) are marked CLOSED_EXTERNAL.
     """
     try:
         from modules.market_data_forex import get_open_positions
@@ -39,6 +44,9 @@ def check_forex_positions() -> None:
                     trade.outcome = "CLOSED_EXTERNAL"
                     trade.closed_at = datetime.utcnow()
                     db.commit()
+                    continue
+
+                _check_partial_tp(trade, db)
 
             for p in positions:
                 logger.debug(f"[capital] {p['symbol']} deal {p['id']} "
@@ -52,6 +60,65 @@ def check_forex_positions() -> None:
 
     except Exception as e:
         logger.error(f"[capital] check_forex_positions error: {e}")
+
+
+def _check_partial_tp(trade: ForexTrade, db) -> None:
+    """
+    Close 50% of the position and move the stop to breakeven once price
+    reaches TP1. Runs at most once per trade (guarded by partial_tp_hit).
+    """
+    if trade.partial_tp_hit:
+        return
+    if trade.tp1 is None or trade.lots is None or not trade.lots:
+        return
+
+    try:
+        from modules.market_data_forex import get_current_price, close_position, place_order
+
+        price = get_current_price(trade.symbol)
+        if not price:
+            return
+
+        hit = (price >= trade.tp1) if trade.signal == "BUY" else (price <= trade.tp1)
+        if not hit:
+            return
+
+        half = round(float(trade.lots) / 2.0, 2)
+        if half <= 0:
+            half = round(float(trade.lots), 2)
+
+        # Reduce the position: close it and reopen the remaining half at
+        # breakeven with the same final target.
+        close_result = close_position(trade.metaapi_position_id)
+        if not close_result.get("success"):
+            logger.error(f"[capital] partial close failed {trade.symbol}: "
+                         f"{close_result.get('error')}")
+            return
+
+        entry = float(trade.entry_price)
+        tp2 = float(trade.tp2 or trade.take_profit or trade.tp1)
+
+        reopen = place_order(trade.symbol, trade.signal, half, entry, tp2)
+        if not reopen.get("success"):
+            logger.error(f"[capital] partial re-open failed {trade.symbol}: "
+                         f"{reopen.get('error')}")
+            trade.outcome = "CLOSED_EXTERNAL"
+            trade.closed_at = datetime.utcnow()
+            db.commit()
+            return
+
+        trade.lots = half
+        trade.stop_loss = entry
+        trade.partial_tp_hit = True
+        trade.metaapi_position_id = reopen.get("deal_id")
+        db.commit()
+
+        logger.info(f"[forex] PARTIAL TP HIT — {trade.symbol} 50% closed @ {price:.5f}, "
+                    f"SL moved to breakeven {entry:.5f}")
+
+    except Exception as e:
+        logger.error(f"[capital] partial tp error {trade.symbol}: {e}")
+        db.rollback()
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
@@ -85,6 +152,10 @@ def get_forex_position_summary() -> Dict:
                     "current":     p.get("current_price"),
                     "sl":          trade.stop_loss,
                     "tp":          trade.take_profit,
+                    "tp1":         trade.tp1,
+                    "tp2":         trade.tp2,
+                    "entry_type":  trade.entry_type,
+                    "partial_tp_hit": bool(trade.partial_tp_hit),
                     "pnl":         round(p.get("unrealized_pnl", 0), 2),
                     "size":        p.get("size"),
                     "lots":        trade.lots,
@@ -182,6 +253,10 @@ def get_forex_trade_history(limit: int = 50) -> List[Dict]:
             "entry":       t.entry_price,
             "sl":          t.stop_loss,
             "tp":          t.take_profit,
+            "tp1":         t.tp1,
+            "tp2":         t.tp2,
+            "entry_type":  t.entry_type,
+            "partial_tp_hit": bool(t.partial_tp_hit),
             "lots":        t.lots,
             "kronos_bias": t.kronos_bias,
             "crt_setup":   t.crt_setup,

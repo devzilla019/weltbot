@@ -5,6 +5,7 @@ Forex/Metals API endpoints
 from fastapi import APIRouter, HTTPException
 from typing import Dict, List
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/forex", tags=["forex"])
@@ -335,7 +336,7 @@ def forex_pair_detail(symbol: str) -> Dict:
         if daily is None and isinstance(levels, dict) and levels:
             daily = next(iter(levels.values()))
 
-        # Active CRT setup (if any) — shows which timeframe triggered the trade
+        # Active CRT setup (if any) — shows the trend, CRT status and entry type
         active_setup = None
         try:
             from main import _forex_active_setups
@@ -344,15 +345,29 @@ def forex_pair_detail(symbol: str) -> Dict:
                 poi = s.get('poi')
                 if isinstance(poi, dict):
                     poi = poi.get('kind')
+                trend = s.get('trend_direction')
+                if trend in ('BULLISH', 'BEARISH'):
+                    if poi or s.get('poi_status') == 'confirmed':
+                        crt_status = 'ENTRY TRIGGERED'
+                    elif s.get('sweep_type'):
+                        crt_status = 'SWEEP CONFIRMED'
+                    else:
+                        crt_status = 'RANGE IDENTIFIED'
+                else:
+                    crt_status = 'WAITING'
+
                 active_setup = {
                     'timeframe': s.get('timeframe'),
                     'sweep_type': s.get('sweep_type'),
                     'direction': s.get('direction'),
+                    'trend_direction': trend or 'NEUTRAL',
+                    'crt_status': crt_status,
                     'target': s.get('target'),
                     'confirm_timeframe': s.get('confirm_timeframe'),
                     'entry_timeframe': s.get('entry_timeframe'),
                     'poi': poi,
                     'poi_status': s.get('poi_status', 'waiting'),
+                    'session': _current_session(),
                 }
         except Exception:
             pass
@@ -364,12 +379,17 @@ def forex_pair_detail(symbol: str) -> Dict:
             'crt_levels': daily,
             'crt_ranges': levels,
             'active_setup': active_setup,
+            'session': _current_session(),
             'open_trade': {
                 'id': open_trade.id,
                 'signal': open_trade.signal,
                 'entry': open_trade.entry_price,
                 'sl': open_trade.stop_loss,
                 'tp': open_trade.take_profit,
+                'tp1': open_trade.tp1,
+                'tp2': open_trade.tp2,
+                'entry_type': open_trade.entry_type,
+                'partial_tp_hit': bool(open_trade.partial_tp_hit),
                 'lots': open_trade.lots,
                 'confidence': open_trade.confidence
             } if open_trade else None,
@@ -381,3 +401,13 @@ def forex_pair_detail(symbol: str) -> Dict:
     except Exception as e:
         logger.error(f"[forex-api] pair detail error {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _current_session() -> str:
+    """Trading session label for the current UTC hour."""
+    hour = datetime.utcnow().hour
+    if 12 <= hour < 15:
+        return 'NY'
+    if 7 <= hour < 12:
+        return 'LONDON'
+    return 'ASIA'

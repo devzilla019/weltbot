@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.sql import func
 from database import Base
 
@@ -81,6 +81,11 @@ class ForexTrade(Base):
     confirm_timeframe   = Column(String, nullable=True)   # POI timeframe
     entry_timeframe     = Column(String, nullable=True)   # SMC entry timeframe
     poi                 = Column(String, nullable=True)   # order_block / breaker_block / fvg / support_resistance
+    # Refined CRT — partial take-profit tracking
+    tp1                 = Column(Float, nullable=True)    # partial target (50% of the move)
+    tp2                 = Column(Float, nullable=True)    # final target
+    entry_type          = Column(String, nullable=True)   # QM / FVG / OB
+    partial_tp_hit      = Column(Boolean, default=False)
     outcome             = Column(String, default="OPEN")
     pnl                 = Column(Float, nullable=True)
     metaapi_position_id = Column(String, nullable=True)

@@ -114,19 +114,35 @@ CAPITAL_BASE_URL = (
 )
 
 FOREX_ENABLED = env_bool("FOREX_ENABLED", False)
-FOREX_PAIRS   = [p.strip() for p in os.getenv(
-    "FOREX_PAIRS", "XAUUSD,EURUSD,GBPUSD,EURCHF,EURJPY,GBPJPY,AUDJPY,NZDCAD"
+
+# Refined CRT with Pullback Entry — forex majors, crosses and metals.
+_FOREX_PAIRS_DEFAULT = (
+    "XAUUSD,XAGUSD,"
+    "EURUSD,GBPUSD,USDJPY,USDCHF,USDCAD,AUDUSD,NZDUSD,"
+    "EURGBP,EURCHF,EURJPY,GBPJPY,GBPCHF,AUDJPY,CADJPY,NZDCAD"
+)
+FOREX_PAIRS = [p.strip() for p in os.getenv(
+    "FOREX_PAIRS", _FOREX_PAIRS_DEFAULT
 ).split(",") if p.strip()]
 
 # Capital.com uses short epic codes
 CAPITAL_EPIC_MAP = {
     "XAUUSD": "GOLD",
+    "XAGUSD": "SILVER",
     "EURUSD": "EURUSD",
     "GBPUSD": "GBPUSD",
+    "USDJPY": "USDJPY",
+    "USDCHF": "USDCHF",
+    "USDCAD": "USDCAD",
+    "AUDUSD": "AUDUSD",
+    "NZDUSD": "NZDUSD",
+    "EURGBP": "EURGBP",
     "EURCHF": "EURCHF",
     "EURJPY": "EURJPY",
     "GBPJPY": "GBPJPY",
+    "GBPCHF": "GBPCHF",
     "AUDJPY": "AUDJPY",
+    "CADJPY": "CADJPY",
     "NZDCAD": "NZDCAD",
 }
 
@@ -150,7 +166,7 @@ KRONOS_TOKENIZER   = os.getenv("KRONOS_TOKENIZER",  "NeoQuasar/Kronos-Tokenizer-
 # ── Forex Risk (separate from crypto) ──────────────────────────────────────────
 FOREX_MAX_RISK_PCT = env_float("FOREX_MAX_RISK_PCT", 0.02)  # 2% per trade
 FOREX_MAX_TRADES   = env_int("FOREX_MAX_TRADES",   3)       # 3 max forex positions
-FOREX_MIN_CONF     = env_float("FOREX_MIN_CONF",   85.0)    # 85% minimum
+FOREX_MIN_CONF     = env_float("FOREX_MIN_CONF",   88.0)    # 88% minimum (refined CRT)
 
 # ── Forex Leverage Tiers ───────────────────────────────────────────────────────
 FOREX_LEVERAGE_TIERS = {

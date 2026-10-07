@@ -128,6 +128,10 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
                 entry_price=result.get("fill_price", entry),
                 stop_loss=sl,
                 take_profit=tp,
+                tp1=signal_data.get("tp1"),
+                tp2=signal_data.get("tp2", tp),
+                entry_type=signal_data.get("entry_type"),
+                partial_tp_hit=False,
                 lots=size,
                 kronos_bias=(kronos_bias or {}).get("bias", "NEUTRAL"),
                 crt_setup=signal_data.get("crt_setup", "NONE"),
@@ -143,11 +147,13 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
             db.add(trade)
             db.commit()
             db.refresh(trade)
-            logger.info(f"[capital] trade recorded — {signal} {symbol} id={trade.id} "
-                        f"deal={result.get('deal_id')} "
-                        f"[{signal_data.get('crt_timeframe')}→"
-                        f"{signal_data.get('confirm_timeframe')}→"
-                        f"{signal_data.get('entry_timeframe')}]")
+            if trade.tp1:
+                logger.info(f"[forex] ENTRY {signal} {symbol} @ {trade.entry_price:.5f} | "
+                            f"{signal_data.get('entry_type', '?')} | conf={confidence:.0f}% | "
+                            f"SL={sl:.5f} | TP1={trade.tp1:.5f} | TP2={tp:.5f}")
+            else:
+                logger.info(f"[capital] trade recorded — {signal} {symbol} id={trade.id} "
+                            f"deal={result.get('deal_id')}")
             result["trade_id"] = trade.id
         except Exception as e:
             logger.error(f"[capital] db record error: {e}")

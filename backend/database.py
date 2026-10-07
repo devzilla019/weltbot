@@ -38,6 +38,11 @@ def run_light_migrations():
             ("confirm_timeframe", "VARCHAR"),
             ("entry_timeframe", "VARCHAR"),
             ("poi", "VARCHAR"),
+            # Refined CRT with Pullback Entry — partial take-profit tracking
+            ("tp1", "FLOAT"),
+            ("tp2", "FLOAT"),
+            ("entry_type", "VARCHAR"),
+            ("partial_tp_hit", "BOOLEAN DEFAULT 0"),
         ],
     }
     try:

@@ -14,6 +14,12 @@ export default function PositionCard({position:p,onClose}){
   const rewardPct=p.reward_pct??0;
   const rr=p.risk_reward??0;
 
+  // Refined CRT partial take-profit levels
+  const tp1=p.tp1??null;
+  const tp2=p.tp2??null;
+  const partialHit=!!p.partial_tp_hit;
+  const entryType=p.entry_type??null;
+
   return(
     <div style={{background:"var(--surface)",border:`1px solid ${isP?"rgba(52,229,176,0.25)":"rgba(255,92,138,0.25)"}`,borderRadius:"var(--radius-md)",padding:14}}>
       {/* Header */}
@@ -23,6 +29,8 @@ export default function PositionCard({position:p,onClose}){
             <span style={{fontFamily:"var(--font-display)",fontSize:15,fontWeight:700}}>{p.asset?.replace("/USDT","")}</span>
             <span className={`tag tag-${p.signal}`}>{p.signal}</span>
             <span className={`lev-badge ${levC}`}>{lev}x</span>
+            {entryType&&<span className="chip chip-bull" style={{fontSize:8,padding:"1px 6px"}}>{entryType}</span>}
+            {partialHit&&<span className="chip chip-bull" style={{fontSize:8,padding:"1px 6px"}}>50% closed</span>}
           </div>
           <div style={{fontSize:10,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>{(p.confidence||0).toFixed(1)}% confidence</div>
         </div>
@@ -65,9 +73,23 @@ export default function PositionCard({position:p,onClose}){
       <div style={{height:4,background:"var(--surface2)",borderRadius:2,marginBottom:4,overflow:"hidden"}}>
         <div style={{height:"100%",borderRadius:2,width:`${progress}%`,background:isP?"var(--buy)":"var(--sell)",transition:"width 0.6s ease"}}/>
       </div>
-      <div style={{display:"flex",justifyContent:"space-between",marginBottom:10,fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:tp1!=null?6:10,fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>
         <span>SL</span><span>{progress.toFixed(0)}% to TP</span><span>TP</span>
       </div>
+
+      {/* Partial TP (refined CRT) */}
+      {tp1!=null&&(
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}}>
+          <div style={{background:"rgba(245,185,66,0.08)",border:"1px solid rgba(245,185,66,0.2)",borderRadius:6,padding:"7px 10px"}}>
+            <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>TP1 · 50%</div>
+            <div style={{fontSize:11,fontFamily:"var(--font-mono)",color:"var(--warn)"}}>{fmtP(tp1)}</div>
+          </div>
+          <div style={{background:"rgba(52,229,176,0.08)",border:"1px solid rgba(52,229,176,0.2)",borderRadius:6,padding:"7px 10px"}}>
+            <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>TP2 · FINAL</div>
+            <div style={{fontSize:11,fontFamily:"var(--font-mono)",color:"var(--buy)"}}>{fmtP(tp2??p.tp)}</div>
+          </div>
+        </div>
+      )}
 
       <button onClick={onClose} style={{width:"100%",padding:"7px",borderRadius:6,fontSize:11,background:"rgba(255,92,138,0.1)",color:"var(--sell)",border:"1px solid rgba(255,92,138,0.25)",cursor:"pointer",fontFamily:"var(--font-mono)"}}>✕ Close Manually</button>
     </div>

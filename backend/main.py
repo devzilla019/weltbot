@@ -125,7 +125,7 @@ def level1_bos_scan():
         if not state.is_running or state.paused:
             return
         from modules.universe      import get_universe
-        from modules.signal_engine import scan_for_bos, ema_momentum_scan
+        from modules.signal_engine import scan_for_bos, ema_momentum_scan, scan_btc_eth_crt, CRT_PULLBACK_SYMBOLS
 
         balance    = safe_get_balance()
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
@@ -147,6 +147,13 @@ def level1_bos_scan():
             if symbol in new_setups:
                 continue
             try:
+                # BTC/ETH: refined CRT pullback strategy first
+                if symbol in CRT_PULLBACK_SYMBOLS:
+                    crt_setup = scan_btc_eth_crt(symbol)
+                    if crt_setup:
+                        new_setups[symbol] = crt_setup
+                        continue
+
                 setup = scan_for_bos(symbol)
                 if setup:
                     new_setups[symbol] = setup
@@ -289,7 +296,7 @@ def run_kronos_bias_update():
 
 
 def run_crt_scan():
-    """Scan for CRT setups across 1d / 4h / 1h / 15m (sweep + close inside)."""
+    """Refined CRT scan — H4 trend, H1 pullback range, sweep confirmation."""
     global _forex_active_setups
     from config import FOREX_ENABLED
     if not FOREX_ENABLED:
@@ -306,43 +313,34 @@ def run_crt_scan():
         if not state.is_running or state.paused:
             return
 
-        from modules.crt_detector import scan_symbol, validate_with_kronos, store_crt_level, CRT_TIMEFRAMES, get_cascade
+        from modules.crt_detector import scan_symbol_refined, validate_with_kronos, store_crt_level
         from modules.kronos_engine import get_cached_bias
         from config import FOREX_PAIRS
 
-        print(f"[crt] scanning {len(FOREX_PAIRS)} pairs across {CRT_TIMEFRAMES}")
+        print(f"[crt] scanning {len(FOREX_PAIRS)} pairs (H4 trend → H1 pullback → sweep)")
 
         for symbol in FOREX_PAIRS:
             try:
                 if symbol in _forex_active_setups:
                     continue
 
-                setups = scan_symbol(symbol)
-                if not setups:
+                sweep = scan_symbol_refined(symbol)
+                if not sweep:
                     continue
 
-                # Prefer the highest timeframe setup (1d > 4h > 1h > 15m)
-                setups.sort(key=lambda s: CRT_TIMEFRAMES.index(s["timeframe"]))
                 bias = get_cached_bias(symbol)
+                if not validate_with_kronos(sweep, bias):
+                    continue
 
-                for sweep in setups:
-                    if not validate_with_kronos(sweep, bias):
-                        continue
+                sweep["confirm_timeframe"] = "15m"
+                sweep["entry_timeframe"] = "5m"
+                sweep["poi"] = None
+                sweep["poi_status"] = "waiting"
 
-                    # Attach the cascade plan immediately so the UI can show
-                    # the full chain (CRT -> confirm -> entry) from the start.
-                    cascade = get_cascade(sweep["timeframe"])
-                    sweep["confirm_timeframe"] = cascade["confirm"]
-                    sweep["entry_timeframe"] = cascade["entry"]
-                    sweep["poi"] = None
-                    sweep["poi_status"] = "waiting"
-
-                    _forex_active_setups[symbol] = sweep
-                    store_crt_level(sweep)
-                    print(f"[crt] {symbol} {sweep['timeframe']} setup confirmed — "
-                          f"{sweep['direction']} target={sweep['target']:.5f} "
-                          f"(confirm {cascade['confirm']} → entry {cascade['entry']})")
-                    break
+                _forex_active_setups[symbol] = sweep
+                store_crt_level(sweep)
+                print(f"[crt] {symbol} {sweep['trend_direction']} setup confirmed — "
+                      f"{sweep['direction']} target={sweep['target']:.5f}")
 
             except Exception as e:
                 print(f"[crt] error {symbol}: {e}")
@@ -373,11 +371,10 @@ def run_forex_entry_check():
             return
         
         from modules.market_data_forex import get_candles, get_current_price
-        from modules.forex_signal_engine import check_entry_condition, confirm_on_timeframe
+        from modules.forex_signal_engine import check_entry_condition_refined
         from modules.forex_executor import place_forex_order
         from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
         from modules.kronos_engine import get_cached_bias
-        from modules.crt_detector import get_cascade
 
         # Hard time budget so the job never overruns its 60s interval
         import time as _time
@@ -389,10 +386,10 @@ def run_forex_entry_check():
                 break
             try:
                 setup = _forex_active_setups[symbol]
-                crt_tf = setup.get('timeframe', '1d')
-                cascade = get_cascade(crt_tf)
-                confirm_tf = cascade['confirm']
-                entry_tf = cascade['entry']
+                trend = setup.get('trend_direction')
+                if trend not in ('BULLISH', 'BEARISH'):
+                    _forex_active_setups.pop(symbol, None)
+                    continue
 
                 allowed, reason = can_open_forex_trade(symbol)
                 if not allowed:
@@ -400,31 +397,21 @@ def run_forex_entry_check():
                         print(f"[forex-entry] {symbol} blocked: {reason}")
                     continue
 
-                # ── CASCADE STEP 2: confirm a POI on the mid timeframe ────────
-                poi = confirm_on_timeframe(setup, confirm_tf)
-                if not poi:
-                    # No POI yet — keep the setup alive and wait
-                    setup['confirm_timeframe'] = confirm_tf
-                    setup['entry_timeframe'] = entry_tf
-                    setup['poi'] = None
-                    setup['poi_status'] = 'waiting'
-                    continue
-
-                setup['confirm_timeframe'] = confirm_tf
-                setup['entry_timeframe'] = entry_tf
-                setup['poi'] = poi.get('kind')
-                setup['poi_status'] = 'confirmed'
-
-                # ── CASCADE STEP 3: SMC entry on the lower timeframe ──────────
                 price = get_current_price(symbol)
-                if price is None:
+                if not price:
                     continue
 
-                df_entry = get_candles(symbol, timeframe=entry_tf, limit=60)
-                if df_entry is None or len(df_entry) < 20:
+                # 15m is the primary entry timeframe, 5m is the refinement
+                df_15m = get_candles(symbol, timeframe='15m', limit=100)
+                df_5m = get_candles(symbol, timeframe='5m', limit=100)
+                if df_15m is None and df_5m is None:
                     continue
 
-                signal = check_entry_condition(setup, price, df_entry)
+                # Keep the H1 pullback context available to the entry logic
+                if '_df_h1' not in setup:
+                    setup['_df_h1'] = get_candles(symbol, timeframe='1h', limit=100)
+
+                signal = check_entry_condition_refined(setup, price, df_15m, df_5m, trend)
 
                 if signal:
                     bias = get_cached_bias(symbol)
@@ -436,12 +423,15 @@ def run_forex_entry_check():
                     if signal['confidence'] >= FOREX_MIN_CONF:
                         result = place_forex_order(signal, bias or {})
                         if result['success']:
-                            print(f"[forex-entry] TRADE PLACED — {signal['signal']} {symbol} "
-                                  f"@ {signal['entry_price']:.5f} "
-                                  f"[CRT {crt_tf} → confirm {confirm_tf} ({poi['kind']}) → entry {entry_tf}]")
+                            print(f"[forex] ENTRY {signal['signal']} {symbol} @ "
+                                  f"{signal['entry_price']:.5f} | {signal['entry_type']} | "
+                                  f"conf={signal['confidence']:.0f}% | "
+                                  f"SL={signal['stop_loss']:.5f} | "
+                                  f"TP1={signal['tp1']:.5f} | TP2={signal['tp2']:.5f}")
                             _forex_active_setups.pop(symbol, None)
                     else:
-                        print(f"[forex-entry] {symbol} confidence too low: {signal['confidence']:.1f}%")
+                        print(f"[forex-entry] {symbol} confidence too low: "
+                              f"{signal['confidence']:.1f}%")
                         _forex_active_setups.pop(symbol, None)
 
             except Exception as e:
@@ -514,8 +504,12 @@ def run_crypto_crt_scan():
             return
         from modules.universe import get_universe
         from modules.crypto_strategy import update_crypto_levels, scan_crypto_crt, get_crypto_setups
+        from modules.signal_engine import CRT_PULLBACK_SYMBOLS
         symbols = get_universe()
         for sym in symbols:
+            # BTC/ETH use the refined CRT pullback engine (level1_bos_scan)
+            if sym in CRT_PULLBACK_SYMBOLS:
+                continue
             try:
                 update_crypto_levels(sym)
                 scan_crypto_crt(sym)
@@ -659,7 +653,10 @@ scheduler.add_job(refresh_signal_cache, "interval", minutes=10, **_JOB_OPTS)
 
 # Forex jobs
 scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15, **_JOB_OPTS)
-scheduler.add_job(run_crt_scan,               "interval", minutes=15, **_JOB_OPTS)
+# Refined CRT — NY pre-open + London open are prioritised, 30-min monitor runs continuously
+scheduler.add_job(run_crt_scan,               "cron", hour=12, minute=30, timezone="UTC", **_JOB_OPTS)
+scheduler.add_job(run_crt_scan,               "cron", hour=8,  minute=0,  timezone="UTC", **_JOB_OPTS)
+scheduler.add_job(run_crt_scan,               "interval", minutes=30, **_JOB_OPTS)
 scheduler.add_job(run_forex_entry_check,      "interval", seconds=60, **_JOB_OPTS)
 scheduler.add_job(run_forex_position_monitor, "interval", minutes=2, **_JOB_OPTS)
 scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1, **_JOB_OPTS)

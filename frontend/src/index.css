@@ -1546,6 +1546,7 @@ body {
 .chip-bear { background: rgba(255,92,138,0.1); color: var(--sell); border-color: rgba(255,92,138,0.28); }
 .chip-neutral { background: rgba(167,139,250,0.08); color: var(--text3); border-color: var(--border); }
 .chip-wait { background: rgba(245,185,66,0.1); color: var(--warn); border-color: rgba(245,185,66,0.28); }
+.chip-warn { background: rgba(245,185,66,0.1); color: var(--warn); border-color: rgba(245,185,66,0.28); }
 .chip-live { background: rgba(167,139,250,0.12); color: var(--lav-2); border-color: var(--border2); }
 .chip-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .chip-dot.pulse { animation: pulse 1.8s ease infinite; }

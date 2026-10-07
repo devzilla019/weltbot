@@ -332,6 +332,195 @@ def calculate_sl_tp(entry: float, ob: dict, direction: str, atr: float, confiden
 
 # ── MAIN L1 SCAN ──────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  REFINED CRT WITH PULLBACK ENTRY — BTC/ETH only
+#  The other crypto pairs keep the existing SMC engine.
+# ══════════════════════════════════════════════════════════════════════════════
+
+CRT_PULLBACK_SYMBOLS = {"BTC/USDT", "ETH/USDT"}
+
+_CRT_MIN_CONF = 88
+
+
+def _crt_candles(symbol: str, interval: str, limit: int):
+    """Fetch Binance candles with a 'timestamp' column for the CRT detector."""
+    df = fetch_ohlcv(symbol, interval=interval, limit=limit)
+    if df is None or df.empty:
+        return None
+    out = df.reset_index()
+    if "timestamp" not in out.columns:
+        out = out.rename(columns={out.columns[0]: "timestamp"})
+    return out
+
+
+def _crt_signal_to_crypto(sig: dict, price: float, atr: float) -> dict:
+    """
+    Convert a refined-CRT signal into the shape the crypto executor expects
+    (mirrors the ema_momentum_scan / check_entry_for_setup output).
+    """
+    direction = "bullish" if sig["signal"] == "BUY" else "bearish"
+    entry = sig["entry_price"]
+    sl = sig["stop_loss"]
+    tp = sig["take_profit"]
+
+    return {
+        "symbol": sig["symbol"],
+        "signal": sig["signal"],
+        "confidence": sig["confidence"],
+        "raw_score": 0.9 if sig["signal"] == "BUY" else -0.9,
+        "strategy": "CRT_PULLBACK",
+        "entry_type": sig.get("entry_type"),
+        "trend_direction": sig.get("trend_direction"),
+        "tp1": sig.get("tp1"),
+        "tp2": sig.get("tp2"),
+        "bos": {
+            "direction": direction,
+            "bos_level": entry,
+            "impulse_high": max(entry, tp),
+            "impulse_low": min(entry, sl),
+        },
+        "fib": sig.get("fib") or {
+            "zone_high": max(entry, sl),
+            "zone_low": min(entry, sl),
+            "range": abs(entry - sl),
+        },
+        "ob": {
+            "ob_high": sig.get("order_block", {}).get("ob_high", entry),
+            "ob_low": sig.get("order_block", {}).get("ob_low", sl),
+            "direction": direction,
+        },
+        "bias": {"bias": direction, "4h": direction, "1h": direction, "score": 3},
+        "entry_tf": sig.get("entry_timeframe", "15m"),
+        "sl_tp": {
+            "stop_loss": sl,
+            "take_profit": tp,
+            "risk_dist": abs(entry - sl),
+            "risk_pct": abs(entry - sl) / entry * 100 if entry else 0,
+        },
+        "sub_scores": {"bos": 1, "fib": 1, "ob": 1, "ma": 1, "entry": 1, "bias": 1},
+        "reasoning": [
+            f"CRT pullback {sig.get('trend_direction')} | "
+            f"{sig.get('entry_type')} entry | conf {sig['confidence']}%"
+        ],
+        "market": {
+            "price": price,
+            "atr": atr,
+            "atr_ok": True,
+            "rsi": 50,
+            "rsi_score": 0,
+            "macd": {"histogram": 0},
+            "macd_score": 0,
+            "trend": {"score": 1.0 if direction == "bullish" else -1.0, "label": direction},
+            "volume": {"score": 0},
+            "change_pct": 0,
+        },
+        "sentiment": {"score": 0, "label": "neutral"},
+    }
+
+
+def scan_btc_eth_crt(symbol: str) -> dict | None:
+    """
+    Refined CRT with Pullback Entry for BTC/USDT and ETH/USDT.
+
+    H4 trend direction -> H1 pullback CRT range -> sweep -> 15m/5m entry
+    (QM > FVG > OB). Uses the existing Binance market_data candles.
+
+    Returns a setup dict in the same shape as the forex CRT setup, with
+    'direct_signal' attached when an entry trigger is already live.
+    """
+    try:
+        from modules.crt_detector import (identify_trend_direction,
+                                          identify_pullback_candles,
+                                          validate_crt_range, detect_crt_sweep)
+        from modules.forex_signal_engine import (check_entry_condition_refined,
+                                                 calculate_atr)
+
+        h4 = _crt_candles(symbol, "4h", 200)
+        trend = identify_trend_direction(symbol, h4)
+        if trend == "NEUTRAL":
+            return None
+
+        h1 = _crt_candles(symbol, "1h", 100)
+        if h1 is None or len(h1) < 10:
+            return None
+
+        candidates = identify_pullback_candles(h1, trend)
+        if not candidates:
+            print(f"[crypto-crt] {symbol} no {trend.lower()} pullback candles on H1")
+            return None
+
+        h1r = h1.reset_index(drop=True)
+        n = len(h1r)
+        setup = None
+
+        for cand in reversed(candidates):
+            idx = cand["index"]
+            if idx + 1 >= n:
+                continue
+            if not validate_crt_range(cand, h1r.iloc[idx + 1]):
+                continue
+
+            sweep = detect_crt_sweep(h1r, cand, trend)
+            if not sweep:
+                continue
+
+            side = "bearish" if trend == "BULLISH" else "bullish"
+            print(f"[crypto-crt] {symbol} H1 pullback: {len(candidates)} {side} "
+                  f"candles identified, range valid")
+            print(f"[crypto-crt] {symbol} SWEEP CONFIRMED — "
+                  f"{'low' if sweep['sweep_type'] == 'LOW' else 'high'} swept, "
+                  f"closed back inside, {trend.lower()} setup")
+
+            sweep.update({
+                "symbol": symbol,
+                "timeframe": "1h",
+                "trend_direction": trend,
+                "crt_high": cand["high"],
+                "crt_low": cand["low"],
+                "crt_range": cand["high"] - cand["low"],
+                "range_high": cand["high"],
+                "range_low": cand["low"],
+                "pdh": cand["high"],
+                "pdl": cand["low"],
+                "pullback_high": cand["high"],
+                "pullback_low": cand["low"],
+                "crt_pullback": True,
+                "candle_age": 0,
+            })
+            setup = sweep
+            break
+
+        if not setup:
+            return None
+
+        # ── Entry trigger on 15m / 5m ────────────────────────────────────────
+        df15 = _crt_candles(symbol, "15m", 100)
+        df5 = _crt_candles(symbol, "5m", 100)
+        entry_df = df5 if (df5 is not None and len(df5)) else df15
+        if entry_df is None or len(entry_df) == 0:
+            return setup
+
+        price = float(entry_df["close"].iloc[-1])
+        atr = calculate_atr(entry_df)
+        setup["entry_timeframe"] = "5m" if entry_df is df5 else "15m"
+        setup["confirm_timeframe"] = "15m"
+        setup["_df_h1"] = h1r
+
+        signal = check_entry_condition_refined(setup, price, df15, df5, trend)
+        if signal and signal["confidence"] >= _CRT_MIN_CONF:
+            print(f"[crypto-crt] {symbol} ENTRY {signal['signal']} @ "
+                  f"{signal['entry_price']:.2f} | {signal['entry_type']} | "
+                  f"conf={signal['confidence']}%")
+            setup["direct_signal"] = _crt_signal_to_crypto(signal, price, atr)
+            setup["strategy"] = "CRT_PULLBACK"
+
+        return setup
+
+    except Exception as e:
+        print(f"[crypto-crt] {symbol} refined scan error: {e}")
+        return None
+
+
 def scan_for_bos(symbol: str) -> dict | None:
     """
     Full SMC scan with ALL validations.

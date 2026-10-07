@@ -112,6 +112,257 @@ def calculate_pdh_pdl(symbol: str, daily_candles: pd.DataFrame) -> Optional[Dict
     return calculate_range(symbol, daily_candles, timeframe="1d")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  REFINED CRT WITH PULLBACK ENTRY
+#  Trade WITH the H4 trend by finding the H1 pullback, then the sweep of that
+#  pullback's range. This replaces the old per-pair PDH/PDL sweep logic.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# H4 EMA used for the trend filter
+_TREND_EMA_PERIOD = 50
+
+# How many H1 candles back to look for pullback candidates
+_PULLBACK_LOOKBACK = 20
+
+# Swing detection lookback (bars either side of a pivot)
+_SWING_LOOKBACK = 3
+
+
+def _ema(series: pd.Series, period: int = _TREND_EMA_PERIOD) -> float:
+    """Last EMA value of a series (0.0 when there is not enough data)."""
+    if series is None or len(series) < period:
+        return 0.0
+    val = series.ewm(span=period, adjust=False).mean().iloc[-1]
+    return float(val) if pd.notna(val) else 0.0
+
+
+def _swing_indices(df: pd.DataFrame, lookback: int = _SWING_LOOKBACK):
+    """Return (swing_high_idx, swing_low_idx) lists of positional indices."""
+    highs, lows = [], []
+    n = len(df)
+    h = df["high"].values
+    l = df["low"].values
+    for i in range(lookback, n - lookback):
+        if all(h[i] > h[i - j] for j in range(1, lookback + 1)) and \
+           all(h[i] > h[i + j] for j in range(1, lookback + 1)):
+            highs.append(i)
+        if all(l[i] < l[i - j] for j in range(1, lookback + 1)) and \
+           all(l[i] < l[i + j] for j in range(1, lookback + 1)):
+            lows.append(i)
+    return highs, lows
+
+
+# ── STEP 1: trend direction filter ────────────────────────────────────────────
+
+def identify_trend_direction(symbol: str, h4_df: pd.DataFrame) -> str:
+    """
+    Determine H4 market direction from structure (HH/HL vs LL/LH) AND EMA50.
+
+    Both must agree — if structure and EMA50 conflict the result is NEUTRAL.
+
+    Returns: 'BULLISH' | 'BEARISH' | 'NEUTRAL'
+    """
+    try:
+        if h4_df is None or len(h4_df) < _TREND_EMA_PERIOD + 5:
+            logger.info(f"[crt] {symbol} H4 trend: NEUTRAL (insufficient candles)")
+            return "NEUTRAL"
+
+        df = h4_df.reset_index(drop=True)
+        sh_idx, sl_idx = _swing_indices(df)
+
+        price = float(df["close"].iloc[-1])
+        ema50 = _ema(df["close"])
+
+        structure = "NEUTRAL"
+        if len(sh_idx) >= 2 and len(sl_idx) >= 2:
+            hh = df["high"].iloc[sh_idx[-1]] > df["high"].iloc[sh_idx[-2]]
+            hl = df["low"].iloc[sl_idx[-1]] > df["low"].iloc[sl_idx[-2]]
+            lh = df["high"].iloc[sh_idx[-1]] < df["high"].iloc[sh_idx[-2]]
+            ll = df["low"].iloc[sl_idx[-1]] < df["low"].iloc[sl_idx[-2]]
+            if hh and hl:
+                structure = "BULLISH"
+            elif lh and ll:
+                structure = "BEARISH"
+
+        ema_bias = "NEUTRAL"
+        if ema50 > 0:
+            ema_bias = "BULLISH" if price > ema50 else "BEARISH"
+
+        if structure == "BULLISH" and ema_bias == "BULLISH":
+            logger.info(f"[crt] {symbol} H4 trend: BULLISH (HH/HL confirmed, above EMA50)")
+            return "BULLISH"
+        if structure == "BEARISH" and ema_bias == "BEARISH":
+            logger.info(f"[crt] {symbol} H4 trend: BEARISH (LL/LH confirmed, below EMA50)")
+            return "BEARISH"
+
+        logger.info(f"[crt] {symbol} H4 trend: NEUTRAL "
+                    f"(structure={structure}, EMA50={ema_bias} — conflict or unclear)")
+        return "NEUTRAL"
+
+    except Exception as e:
+        logger.error(f"[crt] trend error {symbol}: {e}")
+        return "NEUTRAL"
+
+
+# ── STEP 2: CRT range identification (refined) ────────────────────────────────
+
+def identify_pullback_candles(h1_df: pd.DataFrame, trend: str) -> List[Dict]:
+    """
+    Find candidate CRT range candles — the counter-trend pullback candles.
+
+    BULLISH: bearish candles (pullback down) — each candidate carries its
+             high/low so the sweep of its low can be tested later.
+    BEARISH: bullish candles (pullback up) — sweep of its high is tested.
+
+    Returns a list of dicts, oldest first, each with:
+        index, candle_index, high, low, open, close, body_pct
+    """
+    try:
+        if h1_df is None or len(h1_df) < 5:
+            return []
+        if trend not in ("BULLISH", "BEARISH"):
+            return []
+
+        df = h1_df.reset_index(drop=True)
+        start = max(0, len(df) - _PULLBACK_LOOKBACK)
+        candidates: List[Dict] = []
+
+        for i in range(start, len(df) - 1):
+            c = df.iloc[i]
+            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+            rng = h - l
+            if rng <= 0:
+                continue
+
+            is_bearish = cl < o
+            is_bullish = cl > o
+
+            if trend == "BULLISH" and is_bearish:
+                candidates.append({
+                    "index": i,
+                    "candle_index": i,
+                    "open": o, "high": h, "low": l, "close": cl,
+                    "body_pct": abs(cl - o) / rng,
+                    "direction": "BEARISH",
+                })
+            elif trend == "BEARISH" and is_bullish:
+                candidates.append({
+                    "index": i,
+                    "candle_index": i,
+                    "open": o, "high": h, "low": l, "close": cl,
+                    "body_pct": abs(cl - o) / rng,
+                    "direction": "BULLISH",
+                })
+
+        return candidates
+
+    except Exception as e:
+        logger.error(f"[crt] pullback candle error: {e}")
+        return []
+
+
+def validate_crt_range(candle: Dict, next_candle) -> bool:
+    """
+    A CRT range stays valid when the NEXT candle closes INSIDE the range —
+    i.e. it does not close above the candle's high (range invalidated) and
+    does not close below the candle's low (pullback too deep).
+    """
+    try:
+        if candle is None or next_candle is None:
+            return False
+        n_close = float(next_candle["close"])
+        return float(candle["low"]) <= n_close <= float(candle["high"])
+    except Exception as e:
+        logger.error(f"[crt] range validation error: {e}")
+        return False
+
+
+def detect_crt_sweep(h1_df: pd.DataFrame, crt_range_candle: Dict, trend: str) -> Optional[Dict]:
+    """
+    Look for a liquidity sweep of the CRT range after the range candle.
+
+    BULLISH: candle_low < crt_low AND candle_close > crt_low
+             (wick below the range low, close back above it)
+    BEARISH: candle_high > crt_high AND candle_close < crt_high
+             (wick above the range high, close back below it)
+
+    Returns a sweep dict or None.
+    """
+    try:
+        if h1_df is None or crt_range_candle is None:
+            return None
+        if trend not in ("BULLISH", "BEARISH"):
+            return None
+
+        df = h1_df.reset_index(drop=True)
+        idx = crt_range_candle["index"]
+
+        crt_high = float(crt_range_candle["high"])
+        crt_low = float(crt_range_candle["low"])
+
+        # Scan forward from the candle AFTER the range candle
+        for i in range(idx + 1, len(df)):
+            c = df.iloc[i]
+            high = float(c["high"])
+            low = float(c["low"])
+            close = float(c["close"])
+
+            if trend == "BULLISH":
+                if low < crt_low and close > crt_low:
+                    return {
+                        "sweep_type": "LOW",
+                        "direction": "BUY",
+                        "trend_direction": trend,
+                        "crt_high": crt_high,
+                        "crt_low": crt_low,
+                        "crt_range": crt_high - crt_low,
+                        "sweep_candle_low": low,
+                        "sweep_candle_high": high,
+                        "sweep_candle_close": close,
+                        "sweep_index": i,
+                        "body_pct": abs(close - float(c["open"])) / (high - low) if high > low else 0.0,
+                        "range_high": crt_high,
+                        "range_low": crt_low,
+                        "pdh": crt_high,
+                        "pdl": crt_low,
+                        "target": crt_high,
+                        "confirmed": True,
+                    }
+                # Pullback too deep — range is invalidated, stop looking
+                if close < crt_low:
+                    return None
+            else:
+                if high > crt_high and close < crt_high:
+                    return {
+                        "sweep_type": "HIGH",
+                        "direction": "SELL",
+                        "trend_direction": trend,
+                        "crt_high": crt_high,
+                        "crt_low": crt_low,
+                        "crt_range": crt_high - crt_low,
+                        "sweep_candle_high": high,
+                        "sweep_candle_low": low,
+                        "sweep_candle_close": close,
+                        "sweep_index": i,
+                        "body_pct": abs(close - float(c["open"])) / (high - low) if high > low else 0.0,
+                        "range_high": crt_high,
+                        "range_low": crt_low,
+                        "pdh": crt_high,
+                        "pdl": crt_low,
+                        "target": crt_low,
+                        "confirmed": True,
+                    }
+                # Pullback too deep — range is invalidated, stop looking
+                if close > crt_high:
+                    return None
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[crt] sweep error: {e}")
+        return None
+
+
 # ── Sweep detection ───────────────────────────────────────────────────────────
 
 def detect_sweep(symbol: str, candles: pd.DataFrame,
@@ -314,6 +565,96 @@ def scan_symbol(symbol: str, timeframes: Optional[List[str]] = None) -> List[Dic
             continue
 
     return setups
+
+
+def scan_symbol_refined(symbol: str) -> Optional[Dict]:
+    """
+    Refined CRT with Pullback Entry scan for one symbol.
+
+    H4 -> trend direction (HH/HL + EMA50, both must agree)
+    H1 -> pullback CRT range candle, validated, then swept
+
+    Returns a setup dict (ready for the SMC entry layer) or None.
+    """
+    from modules.market_data_forex import get_candles
+
+    try:
+        h4 = get_candles(symbol, timeframe="4h", limit=200)
+        trend = identify_trend_direction(symbol, h4)
+        if trend == "NEUTRAL":
+            return None
+
+        h1 = get_candles(symbol, timeframe="1h", limit=100)
+        if h1 is None or len(h1) < 10:
+            return None
+
+        candidates = identify_pullback_candles(h1, trend)
+        if not candidates:
+            logger.info(f"[crt] {symbol} no {trend.lower()} pullback candles on H1")
+            return None
+
+        h1 = h1.reset_index(drop=True)
+        n = len(h1)
+
+        valid_count = 0
+        # Newest candidates first — the most recent range is the tradeable one
+        for cand in reversed(candidates):
+            idx = cand["index"]
+            if idx + 1 >= n:
+                continue
+
+            if not validate_crt_range(cand, h1.iloc[idx + 1]):
+                continue
+            valid_count += 1
+
+            sweep = detect_crt_sweep(h1, cand, trend)
+            if not sweep:
+                continue
+
+            side = "bearish" if trend == "BULLISH" else "bullish"
+            logger.info(f"[crt] {symbol} H1 pullback: {len(candidates)} {side} "
+                        f"candles identified, range valid")
+            logger.info(f"[crt] {symbol} SWEEP CONFIRMED — "
+                        f"{'low' if sweep['sweep_type'] == 'LOW' else 'high'} swept, "
+                        f"closed back inside, {trend.lower()} setup")
+
+            sweep.update({
+                "symbol": symbol,
+                "timeframe": "1h",
+                "trend_direction": trend,
+                "crt_high": cand["high"],
+                "crt_low": cand["low"],
+                "crt_range": cand["high"] - cand["low"],
+                "range_high": cand["high"],
+                "range_low": cand["low"],
+                "pdh": cand["high"],
+                "pdl": cand["low"],
+                "pullback_high": cand["high"],
+                "pullback_low": cand["low"],
+                "crt_pullback": True,
+                "_df_h1": h1,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            _crt_levels_cache.setdefault(symbol, {})["1h"] = {
+                "symbol": symbol,
+                "timeframe": "1h",
+                "range_high": cand["high"],
+                "range_low": cand["low"],
+                "range": cand["high"] - cand["low"],
+                "date": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                "pdh": cand["high"],
+                "pdl": cand["low"],
+                "trend_direction": trend,
+            }
+            return sweep
+
+        logger.info(f"[crt] {symbol} H1 pullback: {len(candidates)} {side} "
+                    f"candles identified, {valid_count} ranges valid, no sweep yet")
+        return None
+
+    except Exception as e:
+        logger.error(f"[crt] refined scan error {symbol}: {e}")
+        return None
 
 
 def update_all_ranges():
