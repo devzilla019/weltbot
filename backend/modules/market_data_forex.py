@@ -10,12 +10,56 @@ import logging
 import threading
 import time
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 import pandas as pd
 import requests
 
 logger = logging.getLogger(__name__)
+
+# ── Response caches ───────────────────────────────────────────────────────────
+# Capital.com rate-limits aggressively, and the same candles/prices are
+# requested repeatedly (CRT scan + entry checks + the UI polling every pair
+# card). Cache short-lived responses so the bot stays well under the limit.
+
+_CANDLE_TTL  = 20.0    # seconds
+_PRICE_TTL   = 5.0
+_BALANCE_TTL = 20.0
+_POSITIONS_TTL = 5.0
+
+_candle_cache:    Dict[str, Tuple[float, Optional[pd.DataFrame]]] = {}
+_price_cache:     Dict[str, Tuple[float, float]] = {}
+_balance_cache:   Tuple[float, Optional[Dict]] = (0.0, None)
+_positions_cache: Tuple[float, Optional[List[Dict]]] = (0.0, None)
+
+_cache_lock = threading.Lock()
+
+
+def _cache_get(store: dict, key: str, ttl: float):
+    """Return a cached value if it is still fresh, else None."""
+    with _cache_lock:
+        hit = store.get(key)
+    if not hit:
+        return None
+    ts, value = hit
+    if (time.time() - ts) > ttl:
+        return None
+    return value
+
+
+def _cache_put(store: dict, key: str, value) -> None:
+    with _cache_lock:
+        store[key] = (time.time(), value)
+
+
+def clear_caches() -> None:
+    """Drop every cached response (used by the Test Connection button)."""
+    global _balance_cache, _positions_cache
+    with _cache_lock:
+        _candle_cache.clear()
+        _price_cache.clear()
+        _balance_cache = (0.0, None)
+        _positions_cache = (0.0, None)
 
 # ── Resolution mapping (bot format -> Capital.com resolution) ─────────────────
 _RES_MAP = {
@@ -65,6 +109,13 @@ class CapitalSession:
     # Prevents hammering Capital.com and tripping the 429 rate limiter.
     _BACKOFF = [30, 60, 120, 300, 600]
 
+    # Minimum spacing between ANY two requests. Capital.com throttles per
+    # session and a burst of pair-card requests will trip it instantly.
+    _MIN_REQUEST_GAP = 0.20
+
+    # How long to pause all traffic after a 429 (seconds, escalating).
+    _RATE_LIMIT_BACKOFF = [15, 30, 60, 120, 300]
+
     def __init__(self):
         self.cst: Optional[str] = None
         self.security_token: Optional[str] = None
@@ -73,6 +124,11 @@ class CapitalSession:
         self._fail_count: int = 0
         self._next_attempt: float = 0.0
         self._last_login_error: Optional[str] = None
+        # Global request pacing
+        self._last_request: float = 0.0
+        self._throttle_lock = threading.Lock()
+        self._rate_limited_until: float = 0.0
+        self._rate_limit_hits: int = 0
 
     def _configured(self) -> bool:
         from config import CAPITAL_API_KEY, CAPITAL_EMAIL, CAPITAL_PASSWORD
@@ -80,6 +136,44 @@ class CapitalSession:
 
     def _backoff_remaining(self) -> float:
         return max(0.0, self._next_attempt - time.time())
+
+    # ── Global pacing / rate-limit guard ─────────────────────────────────────
+
+    def rate_limit_remaining(self) -> float:
+        """Seconds until the rate-limit pause lifts."""
+        return max(0.0, self._rate_limited_until - time.time())
+
+    def _pace(self) -> bool:
+        """
+        Block until it is safe to issue another request.
+
+        Returns False when a 429 pause is active, so callers bail out early
+        instead of piling more requests onto a throttled session.
+        """
+        remaining = self.rate_limit_remaining()
+        if remaining > 0:
+            return False
+        with self._throttle_lock:
+            gap = time.time() - self._last_request
+            if gap < self._MIN_REQUEST_GAP:
+                time.sleep(self._MIN_REQUEST_GAP - gap)
+            self._last_request = time.time()
+        return True
+
+    def _note_rate_limit(self) -> None:
+        """Escalate the global pause after a 429."""
+        self._rate_limit_hits += 1
+        wait = self._RATE_LIMIT_BACKOFF[
+            min(self._rate_limit_hits - 1, len(self._RATE_LIMIT_BACKOFF) - 1)
+        ]
+        self._rate_limited_until = time.time() + wait
+        logger.warning(f"[capital] rate limited — pausing all requests for {wait}s "
+                       f"(hit #{self._rate_limit_hits})")
+
+    def _note_success(self) -> None:
+        """Decay the rate-limit state after a clean response."""
+        if self._rate_limit_hits:
+            self._rate_limit_hits = max(0, self._rate_limit_hits - 1)
 
     def login(self, force: bool = False) -> bool:
         """Authenticate and store CST + X-SECURITY-TOKEN (with backoff on failure)."""
@@ -181,6 +275,9 @@ class CapitalSession:
 
     def get(self, path: str, params: Optional[dict] = None) -> Optional[requests.Response]:
         global _last_error
+        if not self._pace():
+            _last_error = f"rate-limit pause active ({self.rate_limit_remaining():.0f}s)"
+            return None
         if not self._ensure_session():
             return None
         from config import CAPITAL_BASE_URL
@@ -192,10 +289,15 @@ class CapitalSession:
                 if self.login():
                     resp = requests.get(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
                                         params=params, timeout=20)
+            if resp.status_code == 429:
+                self._note_rate_limit()
+                _last_error = f"HTTP 429: {resp.text[:200]}"
+                return None
             if resp.status_code not in (200, 201):
                 _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(f"[capital] GET {path}: {_last_error}")
                 return None
+            self._note_success()
             _last_error = None
             return resp
         except Exception as e:
@@ -205,6 +307,9 @@ class CapitalSession:
 
     def post(self, path: str, body: dict) -> Optional[requests.Response]:
         global _last_error
+        if not self._pace():
+            _last_error = f"rate-limit pause active ({self.rate_limit_remaining():.0f}s)"
+            return None
         if not self._ensure_session():
             return None
         from config import CAPITAL_BASE_URL
@@ -215,10 +320,15 @@ class CapitalSession:
                 if self.login():
                     resp = requests.post(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
                                          json=body, timeout=20)
+            if resp.status_code == 429:
+                self._note_rate_limit()
+                _last_error = f"HTTP 429: {resp.text[:200]}"
+                return None
             if resp.status_code not in (200, 201):
                 _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(f"[capital] POST {path}: {_last_error}")
                 return None
+            self._note_success()
             _last_error = None
             return resp
         except Exception as e:
@@ -228,6 +338,9 @@ class CapitalSession:
 
     def delete(self, path: str) -> Optional[requests.Response]:
         global _last_error
+        if not self._pace():
+            _last_error = f"rate-limit pause active ({self.rate_limit_remaining():.0f}s)"
+            return None
         if not self._ensure_session():
             return None
         from config import CAPITAL_BASE_URL
@@ -236,10 +349,15 @@ class CapitalSession:
             if resp.status_code == 401:
                 if self.login():
                     resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(), timeout=20)
+            if resp.status_code == 429:
+                self._note_rate_limit()
+                _last_error = f"HTTP 429: {resp.text[:200]}"
+                return None
             if resp.status_code not in (200, 201):
                 _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(f"[capital] DELETE {path}: {_last_error}")
                 return None
+            self._note_success()
             _last_error = None
             return resp
         except Exception as e:
@@ -249,6 +367,98 @@ class CapitalSession:
 
 
 _session = CapitalSession()
+
+
+# ── Epic resolution ───────────────────────────────────────────────────────────
+# The static CAPITAL_EPIC_MAP is a best guess. Not every entry is a real
+# Capital.com epic (e.g. "SILVER" does not exist — the instrument is
+# "SILVER" on some accounts and "XAGUSD" on others), so resolve unknown or
+# rejected epics against the live market list once and cache the answer.
+
+_epic_cache: Dict[str, str] = {}
+_epic_lock = threading.Lock()
+
+# Epics we already know Capital.com rejected — never retry them blindly
+_epic_rejected: set = set()
+
+
+def _search_market_epic(symbol: str) -> Optional[str]:
+    """
+    Look a symbol up in Capital.com's market list and return the best epic.
+
+    Preference order: exact symbol match, then a market whose name starts
+    with the symbol, then the first hit.
+    """
+    bare = symbol.replace("/", "").replace("_", "").upper()
+    resp = _session.get("/api/v1/markets", params={"searchTerm": bare})
+    if resp is None:
+        return None
+
+    try:
+        markets = resp.json().get("markets", [])
+    except Exception:
+        return None
+
+    if not markets:
+        return None
+
+    def _field(m, key):
+        return str(m.get(key) or "").upper()
+
+    exact = [m for m in markets if _field(m, "epic") == bare]
+    if exact:
+        return exact[0].get("epic")
+
+    named = [m for m in markets if _field(m, "instrumentName").startswith(bare)]
+    if named:
+        return named[0].get("epic")
+
+    return markets[0].get("epic")
+
+
+def resolve_epic(symbol: str, refresh: bool = False) -> str:
+    """
+    Return the Capital.com epic for a symbol, discovering it when the static
+    map entry is missing or has already been rejected by the API.
+    """
+    from config import to_epic
+
+    bare = symbol.replace("/", "").replace("_", "").upper()
+
+    with _epic_lock:
+        if not refresh:
+            hit = _epic_cache.get(bare)
+            if hit:
+                return hit
+
+    candidate = to_epic(symbol)
+
+    # A previously rejected static mapping — go straight to discovery
+    if candidate in _epic_rejected or refresh:
+        discovered = _search_market_epic(symbol)
+        if discovered:
+            with _epic_lock:
+                _epic_cache[bare] = discovered
+                _epic_rejected.discard(candidate)
+            logger.info(f"[capital] resolved epic {bare} -> {discovered}")
+            return discovered
+        return candidate
+
+    with _epic_lock:
+        _epic_cache[bare] = candidate
+    return candidate
+
+
+def note_epic_failure(symbol: str) -> None:
+    """Mark a symbol's current epic as bad so the next lookup rediscovers it."""
+    from config import to_epic
+
+    bare = symbol.replace("/", "").replace("_", "").upper()
+    bad = to_epic(symbol)
+    with _epic_lock:
+        _epic_rejected.add(bad)
+        _epic_cache.pop(bare, None)
+    logger.warning(f"[capital] epic {bad} rejected — will rediscover for {bare}")
 
 
 def get_session() -> CapitalSession:
@@ -279,9 +489,13 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
     Fetch OHLCV candles from Capital.com.
     Returns DataFrame: timestamp, open, high, low, close, volume
     """
-    from config import to_epic
-    epic = to_epic(symbol)
+    epic = resolve_epic(symbol)
     resolution = _RES_MAP.get(timeframe, "HOUR")
+
+    cache_key = f"{epic}:{resolution}:{min(int(limit), 1000)}"
+    cached = _cache_get(_candle_cache, cache_key, _CANDLE_TTL)
+    if cached is not None:
+        return cached.copy()
 
     resp = _session.get(f"/api/v1/prices/{epic}",
                         params={"resolution": resolution, "max": min(int(limit), 1000)})
@@ -323,6 +537,7 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
         df = pd.DataFrame(rows)
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        _cache_put(_candle_cache, cache_key, df)
         return df
 
     except Exception as e:
@@ -334,20 +549,29 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
 
 def get_current_price(symbol: str) -> float:
     """Return midpoint of bid/offer. 0.0 on error."""
-    from config import to_epic
-    epic = to_epic(symbol)
+    epic = resolve_epic(symbol)
+
+    cached = _cache_get(_price_cache, epic, _PRICE_TTL)
+    if cached is not None:
+        return cached
 
     resp = _session.get(f"/api/v1/markets/{epic}")
     if resp is None:
-        return 0.0
+        # Unknown epic — rediscover once and retry
+        note_epic_failure(symbol)
+        epic = resolve_epic(symbol, refresh=True)
+        resp = _session.get(f"/api/v1/markets/{epic}")
+        if resp is None:
+            return 0.0
 
     try:
         snap = resp.json().get("snapshot", {})
         bid = _num(snap.get("bid"))
         offer = _num(snap.get("offer"))
-        if bid and offer:
-            return (bid + offer) / 2
-        return bid or offer or 0.0
+        price = (bid + offer) / 2 if (bid and offer) else (bid or offer or 0.0)
+        if price:
+            _cache_put(_price_cache, epic, price)
+        return price
     except Exception as e:
         logger.error(f"[capital] price parse error {epic}: {e}")
         return 0.0
@@ -362,6 +586,11 @@ def get_open_positions() -> List[Dict]:
              unrealized_pnl, sl, tp
     """
     from config import from_epic
+
+    global _positions_cache
+    cached = _cache_get(_positions_cache, "all", _POSITIONS_TTL)
+    if cached is not None:
+        return cached
 
     resp = _session.get("/api/v1/positions")
     if resp is None:
@@ -396,6 +625,7 @@ def get_open_positions() -> List[Dict]:
             except Exception as e:
                 logger.warning(f"[capital] position parse error: {e}")
                 continue
+        _cache_put(_positions_cache, "all", out)
         return out
 
     except Exception as e:
@@ -418,6 +648,11 @@ def get_capital_balance() -> Dict:
     """
     empty = {"balance": 0.0, "profit_loss": 0.0, "deposit": 0.0,
              "available": 0.0, "currency": "USD", "connected": False}
+
+    global _balance_cache
+    cached = _cache_get(_balance_cache, "bal", _BALANCE_TTL)
+    if cached is not None:
+        return cached
 
     resp = _session.get("/api/v1/accounts")
     if resp is None:
@@ -443,7 +678,7 @@ def get_capital_balance() -> Dict:
             profit_loss = _num(a.get("profitLoss"))
             available   = _num(a.get("available"), balance)
 
-        return {
+        result = {
             "balance":     balance,
             "profit_loss": profit_loss,
             "deposit":     deposit,
@@ -453,6 +688,8 @@ def get_capital_balance() -> Dict:
             "account_name": a.get("accountName"),
             "connected":   True,
         }
+        _cache_put(_balance_cache, "bal", result)
+        return result
     except Exception as e:
         logger.error(f"[capital] balance parse error: {e}")
         return empty
@@ -465,8 +702,7 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
     Open a position on Capital.com.
     Returns: {success, deal_id, fill_price, error}
     """
-    from config import to_epic
-    epic = to_epic(symbol)
+    epic = resolve_epic(symbol)
 
     body = {
         "epic": epic,
@@ -481,7 +717,13 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
 
     resp = _session.post("/api/v1/positions", body)
     if resp is None:
-        return {"success": False, "error": _last_error or "order request failed"}
+        # An unknown epic surfaces here as a 400 — rediscover and retry once
+        note_epic_failure(symbol)
+        epic = resolve_epic(symbol, refresh=True)
+        body["epic"] = epic
+        resp = _session.post("/api/v1/positions", body)
+        if resp is None:
+            return {"success": False, "error": _last_error or "order request failed"}
 
     try:
         deal_ref = resp.json().get("dealReference")
@@ -576,6 +818,11 @@ def test_connection() -> Dict:
     _session.security_token = None
     _session.login(force=True)
 
+    # Bypass the response caches so the test reflects live state
+    clear_caches()
+    _session._rate_limited_until = 0.0
+    _session._rate_limit_hits = 0
+
     bal = get_capital_balance()
     if bal.get("connected"):
         report["connected"] = True
@@ -585,7 +832,7 @@ def test_connection() -> Dict:
         report["session"] = session_status()
         return report
 
-    for sym in ("EURUSD", "XAUUSD"):
+    for sym in ("EURUSD", "XAUUSD", "XAGUSD"):
         df = get_candles(sym, timeframe="1h", limit=5)
         if df is not None and len(df) > 0:
             report["symbols_ok"].append(sym)

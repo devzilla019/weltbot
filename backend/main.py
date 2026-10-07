@@ -316,8 +316,17 @@ def run_crt_scan():
         from modules.crt_detector import scan_symbol_refined, validate_with_kronos, store_crt_level
         from modules.kronos_engine import get_cached_bias
         from config import FOREX_PAIRS
+        from modules.market_data_forex import get_session
 
         print(f"[crt] scanning {len(FOREX_PAIRS)} pairs (H4 trend → H1 pullback → sweep)")
+
+        # Capital.com rate-limits hard. If a 429 pause is active, skip the
+        # whole cycle rather than hammering the API for every pair.
+        pause = get_session().rate_limit_remaining()
+        if pause > 0:
+            print(f"[crt] Capital.com rate-limit pause active ({pause:.0f}s) — "
+                  f"deferring scan")
+            return
 
         for symbol in FOREX_PAIRS:
             try:
@@ -370,11 +379,17 @@ def run_forex_entry_check():
         if not state.is_running or state.paused:
             return
         
-        from modules.market_data_forex import get_candles, get_current_price
+        from modules.market_data_forex import get_candles, get_current_price, get_session
         from modules.forex_signal_engine import check_entry_condition_refined
         from modules.forex_executor import place_forex_order
         from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
         from modules.kronos_engine import get_cached_bias
+
+        # Respect an active Capital.com rate-limit pause
+        pause = get_session().rate_limit_remaining()
+        if pause > 0:
+            print(f"[forex-entry] rate-limit pause active ({pause:.0f}s) — deferring")
+            return
 
         # Hard time budget so the job never overruns its 60s interval
         import time as _time

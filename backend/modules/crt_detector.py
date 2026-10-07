@@ -583,7 +583,6 @@ def scan_symbol_refined(symbol: str) -> Optional[Dict]:
         trend = identify_trend_direction(symbol, h4)
         if trend == "NEUTRAL":
             return None
-
         h1 = get_candles(symbol, timeframe="1h", limit=100)
         if h1 is None or len(h1) < 10:
             return None

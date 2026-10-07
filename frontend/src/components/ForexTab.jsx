@@ -20,7 +20,7 @@ export default function ForexTab(){
     load();
     forexApi.kronosStatus().then(setKronos).catch(()=>{});
     forexApi.cascadeStats().then(setCascade).catch(()=>{});
-    const t=setInterval(load,30000);
+    const t=setInterval(load,60000);
     return()=>clearInterval(t);
   },[]);
 
@@ -214,8 +214,8 @@ export default function ForexTab(){
       </div>
 
       <div className="grid-pairs">
-        {pairs?.map(sym=>(
-          <CRTSignalCard key={sym} symbol={sym} bias={biases?.[sym]} levels={crt_levels?.[sym]}/>
+        {pairs?.map((sym,i)=>(
+          <CRTSignalCard key={sym} symbol={sym} index={i} bias={biases?.[sym]} levels={crt_levels?.[sym]}/>
         ))}
       </div>
     </div>

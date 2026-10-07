@@ -16,7 +16,7 @@ const poiLabel=k=>POI_LABELS[k]||(k?String(k).replace(/_/g," "):"—");
 const trendChip=t=>t==="BULLISH"?"chip-bull":t==="BEARISH"?"chip-bear":"chip-neutral";
 const statusChip=s=>s==="ENTRY TRIGGERED"?"chip-bull":s==="SWEEP CONFIRMED"?"chip-live":s==="RANGE IDENTIFIED"?"chip-warn":"chip-wait";
 
-export default function CRTSignalCard({symbol,bias,levels}){
+export default function CRTSignalCard({symbol,bias,levels,index=0}){
   const[price,setPrice]=useState(null);
   const[details,setDetails]=useState(null);
 
@@ -26,10 +26,12 @@ export default function CRTSignalCard({symbol,bias,levels}){
       try{const d=await forexApi.getPair(symbol);if(alive){setPrice(d.current_price);setDetails(d);}}
       catch(e){/* silent */}
     };
-    fetchDetails();
-    const t=setInterval(fetchDetails,45000);
-    return()=>{alive=false;clearInterval(t);};
-  },[symbol]);
+    // Stagger the first call per card so 17 cards don't hit the API at once
+    const startDelay=index*400;
+    const start=setTimeout(fetchDetails,startDelay);
+    const t=setInterval(fetchDetails,90000);
+    return()=>{alive=false;clearTimeout(start);clearInterval(t);};
+  },[symbol,index]);
 
   const biasVal=bias?.bias||"NEUTRAL";
   const cls=biasVal==="BULLISH"?"buy":biasVal==="BEARISH"?"sell":"";
