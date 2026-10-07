@@ -379,7 +379,14 @@ def run_forex_entry_check():
         from modules.kronos_engine import get_cached_bias
         from modules.crt_detector import get_cascade
 
+        # Hard time budget so the job never overruns its 60s interval
+        import time as _time
+        deadline = _time.time() + 50
+
         for symbol in list(_forex_active_setups.keys()):
+            if _time.time() > deadline:
+                print("[forex-entry] time budget reached — deferring remaining setups")
+                break
             try:
                 setup = _forex_active_setups[symbol]
                 crt_tf = setup.get('timeframe', '1d')
@@ -554,7 +561,15 @@ def run_crypto_entry_check():
         if balance < 1.0:
             return
 
+        # Hard time budget — never let this job run past ~50s so the next
+        # 60s tick always gets a slot (prevents "maximum instances reached").
+        import time as _time
+        deadline = _time.time() + 50
+
         for symbol in list(setups.keys()):
+            if _time.time() > deadline:
+                print(f"[crypto-entry] time budget reached — deferring remaining setups")
+                break
             try:
                 allowed, reason = can_reenter(symbol, db)
                 if not allowed:

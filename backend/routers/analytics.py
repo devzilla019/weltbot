@@ -57,18 +57,43 @@ def portfolio(db: Session = Depends(get_db)):
                 pnl_pct = -pnl_pct
             unreal = round(pnl_pct * (t.position_sz or 0) * (t.entry_price or 1), 4)
             unrealized += unreal
+
+            # ── Risk / reward metrics for the live dashboard ──────────────
+            size = t.position_sz or 0
+            entry = t.entry_price or 0
+            sl = t.stop_loss or 0
+            tp = t.take_profit or 0
+
+            risk_usd = abs(entry - sl) * size if sl else 0.0
+            reward_usd = abs(tp - entry) * size if tp else 0.0
+            rr = (reward_usd / risk_usd) if risk_usd > 0 else 0.0
+            risk_pct = (risk_usd / balance * 100) if balance > 0 else 0.0
+            reward_pct = (reward_usd / balance * 100) if balance > 0 else 0.0
+
+            # Progress toward TP (0% at SL, 100% at TP)
+            span = (tp - sl) if (tp and sl) else 0
+            progress = ((current - sl) / span * 100) if span else 0
+            progress = max(0.0, min(100.0, progress))
+
             positions.append({
                 "trade_id":   t.id,
                 "asset":      t.asset,
                 "signal":     t.signal,
                 "confidence": t.confidence,
-                "entry":      t.entry_price,
+                "entry":      entry,
                 "current":    current,
-                "sl":         t.stop_loss,
-                "tp":         t.take_profit,
+                "sl":         sl,
+                "tp":         tp,
                 "pnl_pct":    round(pnl_pct * 100, 3),
                 "unrealized": unreal,
-                "size":       t.position_sz,
+                "size":       size,
+                # risk / reward
+                "risk_usd":     round(risk_usd, 4),
+                "reward_usd":   round(reward_usd, 4),
+                "risk_pct":     round(risk_pct, 2),
+                "reward_pct":   round(reward_pct, 2),
+                "risk_reward":  round(rr, 2),
+                "progress":     round(progress, 1),
             })
 
     # ── Forex (Capital.com) balance — separate from crypto ────────────────────
@@ -88,6 +113,12 @@ def portfolio(db: Session = Depends(get_db)):
 
     total_balance = round(balance + forex_balance, 2)
 
+    # ── Aggregate risk / reward across all open positions ─────────────────────
+    total_risk   = sum(p["risk_usd"] for p in positions)
+    total_reward = sum(p["reward_usd"] for p in positions)
+    avg_rr = (total_reward / total_risk) if total_risk > 0 else 0.0
+    risk_pct_of_balance = (total_risk / balance * 100) if balance > 0 else 0.0
+
     return {
         "balance_usdt":       round(balance, 4),          # crypto / Binance
         "forex_balance":      round(forex_balance, 2),    # Capital.com balance
@@ -97,6 +128,11 @@ def portfolio(db: Session = Depends(get_db)):
         "open_count":         len(positions),
         "unrealized_pnl":     round(unrealized, 4),
         "positions":          positions,
+        # aggregate risk dashboard
+        "total_risk_usd":     round(total_risk, 2),
+        "total_reward_usd":   round(total_reward, 2),
+        "avg_risk_reward":    round(avg_rr, 2),
+        "risk_pct_of_balance": round(risk_pct_of_balance, 2),
     }
 
 

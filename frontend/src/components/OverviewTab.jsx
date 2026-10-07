@@ -91,8 +91,33 @@ export default function OverviewTab({summary,portfolio,signals,botStatus,handleC
 
       {positions.length>0&&(
         <div style={{marginBottom:16}}>
-          <div className="sec-head"><div className="sec-title">Open Positions</div><div className="sec-sub">{positions.length} live</div></div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:12}}>
+          <div className="sec-head"><div className="sec-title">Live Positions</div><div className="sec-sub">{positions.length} open · live risk & reward</div></div>
+
+          {/* Aggregate risk dashboard */}
+          <div className="metric-grid" style={{marginBottom:12}}>
+            <div className="metric">
+              <div className="metric-label">Total at Risk</div>
+              <div className="metric-value" style={{color:"var(--sell)",fontSize:20}}>-${(portfolio?.total_risk_usd??0).toFixed(2)}</div>
+              <div className="metric-sub">{(portfolio?.risk_pct_of_balance??0).toFixed(2)}% of balance</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Total Target</div>
+              <div className="metric-value" style={{color:"var(--buy)",fontSize:20}}>+${(portfolio?.total_reward_usd??0).toFixed(2)}</div>
+              <div className="metric-sub">if all TP hit</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Avg R:R</div>
+              <div className="metric-value" style={{color:"var(--lav-2)",fontSize:20}}>1:{(portfolio?.avg_risk_reward??0).toFixed(2)}</div>
+              <div className="metric-sub">reward / risk</div>
+            </div>
+            <div className="metric">
+              <div className="metric-label">Open P&L</div>
+              <div className="metric-value" style={{color:unrealized>=0?"var(--buy)":"var(--sell)",fontSize:20}}>{unrealized>=0?"+":""}${Math.abs(unrealized).toFixed(2)}</div>
+              <div className="metric-sub">unrealized</div>
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
             {positions.map((p,i)=><PositionCard key={i} position={p} onClose={()=>handleCloseTrade(p.trade_id)}/>)}
           </div>
         </div>

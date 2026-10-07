@@ -113,13 +113,42 @@ def get_asset_balance(asset: str) -> float:
 _ohlcv_cache: dict = {}
 _OHLCV_TTL = 45  # seconds
 
+# Circuit breaker — if a provider fails repeatedly, skip it for a while so a
+# dead endpoint can't stall the 60s entry check (6 mirrors × 10s = 60s hang).
+_provider_failures: dict = {}
+_PROVIDER_COOLDOWN = 300  # seconds to skip a provider after repeated failures
+_FAIL_THRESHOLD = 3
+
+
+def _provider_ok(name: str) -> bool:
+    import time as _t
+    entry = _provider_failures.get(name)
+    if not entry:
+        return True
+    fails, last = entry
+    if fails >= _FAIL_THRESHOLD and (_t.time() - last) < _PROVIDER_COOLDOWN:
+        return False
+    if (_t.time() - last) >= _PROVIDER_COOLDOWN:
+        _provider_failures.pop(name, None)
+    return True
+
+
+def _provider_fail(name: str):
+    import time as _t
+    fails, _ = _provider_failures.get(name, (0, 0))
+    _provider_failures[name] = (fails + 1, _t.time())
+
+
+def _provider_ok_reset(name: str):
+    _provider_failures.pop(name, None)
+
 
 def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
     """
     Fetch OHLCV using multiple providers with fallback.
     Priority: Binance direct → Binance mirrors → CoinGecko
-    CoinGecko works from ALL cloud servers with no IP restrictions.
-    Results are cached for 45s to keep the 60s entry checks fast.
+    Results are cached for 45s and dead providers are skipped (circuit breaker)
+    so the 60s entry checks never stall.
     """
     import time as _t
     cache_key = f"{symbol}:{interval}:{limit}"
@@ -136,22 +165,24 @@ def fetch_ohlcv(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFr
 def _fetch_ohlcv_uncached(symbol: str, interval: str = "1h", limit: int = 60) -> pd.DataFrame:
     sym = symbol.replace("/", "")
 
-    # All Binance mirrors to try
+    # All Binance mirrors to try (short timeout — we fail fast and move on)
     binance_endpoints = [
-        f"https://api.binance.com/api/v3/klines",
-        f"https://api1.binance.com/api/v3/klines",
-        f"https://api2.binance.com/api/v3/klines",
-        f"https://api3.binance.com/api/v3/klines",
-        f"https://api4.binance.com/api/v3/klines",
-        f"https://data-api.binance.vision/api/v3/klines",
+        ("binance",  f"https://api.binance.com/api/v3/klines"),
+        ("binance1", f"https://api1.binance.com/api/v3/klines"),
+        ("binance2", f"https://api2.binance.com/api/v3/klines"),
+        ("binance3", f"https://api3.binance.com/api/v3/klines"),
+        ("binance4", f"https://api4.binance.com/api/v3/klines"),
+        ("binance-vision", f"https://data-api.binance.vision/api/v3/klines"),
     ]
 
-    for url in binance_endpoints:
+    for name, url in binance_endpoints:
+        if not _provider_ok(name):
+            continue
         try:
             resp = requests.get(
                 url,
                 params={"symbol": sym, "interval": interval, "limit": limit},
-                timeout=10,
+                timeout=5,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"},
             )
             if resp.status_code == 200:
@@ -167,8 +198,11 @@ def _fetch_ohlcv_uncached(symbol: str, interval: str = "1h", limit: int = 60) ->
                         df[col] = pd.to_numeric(df[col], errors="coerce")
                     df.dropna(subset=["close"], inplace=True)
                     if len(df) >= 5:
+                        _provider_ok_reset(name)
                         return df[["open","high","low","close","volume"]]
+            _provider_fail(name)
         except Exception:
+            _provider_fail(name)
             continue
 
     # CoinGecko fallback — works from ALL servers
