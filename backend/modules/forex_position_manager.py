@@ -293,9 +293,18 @@ def forex_daily_loss_check() -> Tuple[bool, str]:
 
 
 def can_open_forex_trade(symbol: str) -> Tuple[bool, str]:
-    """Check max-trades limit and whether this symbol already has an open trade."""
+    """
+    Check the daily loss limit, the max-trades limit, and whether this symbol
+    already has a position.
+
+    The duplicate check consults the BROKER as well as the database. Relying
+    on the database alone allowed a second position on a pair that was already
+    open at Capital.com (the DB row can be missing, stale, or closed
+    prematurely), which is how a pair ended up holding two live trades.
+    """
     try:
         from config import FOREX_MAX_TRADES
+        from modules.market_data_forex import get_open_positions
 
         allowed, reason = forex_daily_loss_check()
         if not allowed:
@@ -313,10 +322,18 @@ def can_open_forex_trade(symbol: str) -> Tuple[bool, str]:
             ).first()
             if existing:
                 return False, f"{symbol} already has an open position"
-
-            return True, "OK"
         finally:
             db.close()
+
+        # ── Broker-side check ────────────────────────────────────────────────
+        positions = get_open_positions()
+        if positions is None:
+            # Broker unreachable — fail closed rather than risk a duplicate.
+            return False, "broker position check unavailable"
+        if any(p.get("symbol") == symbol for p in positions):
+            return False, f"{symbol} already open at broker"
+
+        return True, "OK"
 
     except Exception as e:
         logger.error(f"[capital] can_open check error: {e}")

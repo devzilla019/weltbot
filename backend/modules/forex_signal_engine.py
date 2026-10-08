@@ -728,11 +728,23 @@ def _build_signal(crt_setup: Dict, trend: str, entry: float, sl: float, tp2: flo
         # ── Confidence scoring (Step 4) ──────────────────────────────────────
         confidence = _CONF_BASE
 
-        # +5 H4 trend and H1 pullback clearly aligned
-        confidence += 5
+        # +5 H4 trend and H1 pullback clearly aligned.
+        # This block only runs when the trend is BULLISH or BEARISH (NEUTRAL
+        # returns earlier), so awarding +5 unconditionally made the floor
+        # unreachable: 85 + 5 = 90 was the minimum possible score, while the
+        # floor is 88. The bonus is now tied to the setup actually being
+        # well-formed, so weak setups can legitimately score below 88.
+        body_pct = float(crt_setup.get('body_pct') or 0)
+
+        # A sweep with a weak body is not a rejection — it is a doji. Score it
+        # as such so it cannot clear the floor on session/entry bonuses alone.
+        if body_pct >= 0.40:
+            confidence += 5
+        else:
+            confidence -= 5
 
         # +4 sweep candle closed strongly back inside range (body > 60%)
-        if float(crt_setup.get('body_pct') or 0) > 0.60:
+        if body_pct > 0.60:
             confidence += 4
 
         # +3 NY session window (12:00-15:00 UTC) — peak volume
