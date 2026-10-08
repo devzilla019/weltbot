@@ -12,15 +12,18 @@ from routers import signals, trades, analytics, forex, crypto_strategy
 # from routers import auth
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
 from datetime import datetime
-import json, logging, os, threading
+import json, logging, os, sys, threading
 
 # Without this, every logger.info()/logger.warning() call in the modules is
 # silently discarded — uvicorn only configures its own loggers, so the CRT
 # trend/sweep/entry diagnostics never reached the Railway logs.
+# Streams to stdout so Railway tags them [inf] rather than [err].
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
+    stream=sys.stdout,
+    force=True,
 )
 
 Base.metadata.create_all(bind=engine)

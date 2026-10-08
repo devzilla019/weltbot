@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 def _pip_size(symbol: str) -> float:
     """Pip size for a symbol."""
     s = symbol.upper().replace("/", "")
-    if s.startswith("XAU"):
-        return 0.01          # gold: 1 pip = $0.01
+    if s.startswith("XAU") or s.startswith("XAG"):
+        return 0.01          # metals: 1 pip = $0.01
     if s.endswith("JPY"):
         return 0.01          # JPY pairs: 1 pip = 0.01
     return 0.0001            # standard FX: 1 pip = 0.0001
@@ -29,14 +29,32 @@ def _pip_size(symbol: str) -> float:
 def _pip_value_per_lot(symbol: str) -> float:
     """
     USD value of 1 pip for 1 standard lot.
-    GOLD = $1, EURUSD = $10, JPY pairs ≈ $7.
+    EURUSD = $10, JPY pairs ≈ $7, gold = $1, silver = $50.
     """
     s = symbol.upper().replace("/", "")
     if s.startswith("XAU"):
         return 1.0
+    if s.startswith("XAG"):
+        return 50.0
     if s.endswith("JPY"):
         return 7.0
     return 10.0
+
+
+def _contract_size(symbol: str) -> float:
+    """
+    Units of the instrument in 1 standard lot.
+
+    Capital.com's order `size` field is in UNITS, not lots, so a risk-based
+    lot figure must be multiplied by this before it is sent. Sending lots
+    directly produces 'error.invalid.size.minvalue'.
+    """
+    s = symbol.upper().replace("/", "")
+    if s.startswith("XAU"):
+        return 100.0         # 1 lot = 100 troy oz
+    if s.startswith("XAG"):
+        return 5000.0        # 1 lot = 5,000 troy oz
+    return 100000.0          # standard FX lot = 100,000 units of base
 
 
 # ── Position sizing ───────────────────────────────────────────────────────────
@@ -44,14 +62,21 @@ def _pip_value_per_lot(symbol: str) -> float:
 def calculate_position_size(symbol: str, entry: float, sl: float,
                             confidence: float, balance: float) -> float:
     """
-    Return Capital.com lot size (2 dp, min 0.01, max 10.0).
+    Return a Capital.com order size in UNITS (not lots).
 
     risk_amount = balance * FOREX_MAX_RISK_PCT
     risk_pips   = |entry - sl| / pip_size
-    size        = risk_amount / (risk_pips * pip_value_per_lot)
+    lots        = risk_amount / (risk_pips * pip_value_per_lot)
+    size        = lots * contract_size
+
+    The result is snapped to the instrument's minDealSize / minSizeIncrement
+    from Capital.com's dealing rules, because the broker rejects anything
+    smaller than its minimum. On tight stops the minimum can imply more risk
+    than the configured target — that is logged so it is never silent.
     """
     try:
         from config import FOREX_MAX_RISK_PCT
+        from modules.market_data_forex import get_dealing_rules
 
         if balance <= 0:
             balance = 10000.0
@@ -60,27 +85,58 @@ def calculate_position_size(symbol: str, entry: float, sl: float,
 
         pip = _pip_size(symbol)
         pvpl = _pip_value_per_lot(symbol)
+        contract = _contract_size(symbol)
 
         risk_pips = abs(entry - sl) / pip
         if risk_pips < 1:
             logger.warning(f"[capital] {symbol} stop too tight ({risk_pips:.2f} pips)")
             return 0.0
 
-        size = risk_amount / (risk_pips * pvpl)
+        lots = risk_amount / (risk_pips * pvpl)
 
         # Confidence multiplier
         if confidence >= 95:
-            size *= 2.0
+            lots *= 2.0
         elif confidence >= 90:
-            size *= 1.5
+            lots *= 1.5
         elif confidence >= 85:
-            size *= 1.0
+            lots *= 1.0
 
-        size = round(size, 2)
-        size = max(0.01, min(size, 10.0))
+        size = lots * contract
 
-        logger.info(f"[capital] {symbol} size: {size} lots "
-                    f"(risk=${risk_amount:.2f} stop={risk_pips:.1f}pips conf={confidence}%)")
+        # ── Respect the broker's dealing rules ───────────────────────────────
+        rules = get_dealing_rules(symbol)
+        min_size = rules.get("min_deal_size") or 0.0
+        increment = rules.get("min_increment") or 0.0
+        max_size = rules.get("max_deal_size") or 0.0
+
+        if increment > 0:
+            size = round(size / increment) * increment
+            size = round(size, 6)
+        else:
+            size = round(size, 4)
+
+        if min_size > 0 and size < min_size:
+            implied = (min_size / contract) * risk_pips * pvpl
+            logger.warning(
+                f"[capital] {symbol} risk-based size {size} below broker minimum "
+                f"{min_size} — raising to minimum (implied risk ${implied:.2f} vs "
+                f"target ${risk_amount:.2f})"
+            )
+            size = min_size
+
+        if max_size > 0 and size > max_size:
+            logger.warning(f"[capital] {symbol} size {size} capped at broker max {max_size}")
+            size = max_size
+
+        if size <= 0:
+            logger.warning(f"[capital] {symbol} computed size is zero — skipping")
+            return 0.0
+
+        logger.info(f"[capital] {symbol} size: {size} units "
+                    f"(={lots:.4f} lots, risk=${risk_amount:.2f} "
+                    f"stop={risk_pips:.1f}pips conf={confidence}% "
+                    f"min={min_size} inc={increment})")
         return size
 
     except Exception as e:

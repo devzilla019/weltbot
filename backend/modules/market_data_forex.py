@@ -26,11 +26,13 @@ _CANDLE_TTL  = 20.0    # seconds
 _PRICE_TTL   = 5.0
 _BALANCE_TTL = 20.0
 _POSITIONS_TTL = 5.0
+_RULES_TTL   = 3600.0  # instrument dealing rules rarely change
 
 _candle_cache:    Dict[str, Tuple[float, Optional[pd.DataFrame]]] = {}
 _price_cache:     Dict[str, Tuple[float, float]] = {}
 _balance_cache:   Dict[str, Tuple[float, Optional[Dict]]] = {}
 _positions_cache: Dict[str, Tuple[float, Optional[List[Dict]]]] = {}
+_rules_cache:     Dict[str, Tuple[float, Dict]] = {}
 
 _cache_lock = threading.Lock()
 
@@ -59,6 +61,7 @@ def clear_caches() -> None:
         _price_cache.clear()
         _balance_cache.clear()
         _positions_cache.clear()
+        _rules_cache.clear()
 
 # ── Resolution mapping (bot format -> Capital.com resolution) ─────────────────
 _RES_MAP = {
@@ -546,8 +549,49 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
 
 # ── Current price ─────────────────────────────────────────────────────────────
 
+def get_dealing_rules(symbol: str) -> Dict:
+    """
+    Fetch an instrument's dealing rules from Capital.com.
+
+    Returns minDealSize / minSizeIncrement / maxDealSize, which are the
+    broker's authoritative constraints on order size. Sizing against these
+    avoids 'error.invalid.size.minvalue' rejections.
+
+    Returns {} when unavailable — callers must fall back to a safe default.
+    """
+    epic = resolve_epic(symbol)
+
+    cached = _cache_get(_rules_cache, epic, _RULES_TTL)
+    if cached is not None:
+        return cached
+
+    resp = _session.get(f"/api/v1/markets/{epic}")
+    if resp is None:
+        return {}
+
+    try:
+        rules = resp.json().get("dealingRules", {}) or {}
+
+        def _rule(key):
+            node = rules.get(key)
+            if isinstance(node, dict):
+                return _num(node.get("value"), 0.0)
+            return _num(node, 0.0)
+
+        out = {
+            "min_deal_size": _rule("minDealSize"),
+            "min_increment": _rule("minSizeIncrement"),
+            "max_deal_size": _rule("maxDealSize"),
+        }
+        _cache_put(_rules_cache, epic, out)
+        return out
+
+    except Exception as e:
+        logger.error(f"[capital] dealing rules parse error {epic}: {e}")
+        return {}
+
+
 def get_current_price(symbol: str) -> float:
-    """Return midpoint of bid/offer. 0.0 on error."""
     epic = resolve_epic(symbol)
 
     cached = _cache_get(_price_cache, epic, _PRICE_TTL)
@@ -705,7 +749,7 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
     body = {
         "epic": epic,
         "direction": signal,          # BUY / SELL
-        "size": round(float(size), 2),
+        "size": float(size),          # units — already snapped to dealing rules
         "guaranteedStop": False,
     }
     if sl:
