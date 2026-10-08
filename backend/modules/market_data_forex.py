@@ -622,11 +622,15 @@ def get_current_price(symbol: str) -> float:
 
 # ── Open positions ────────────────────────────────────────────────────────────
 
-def get_open_positions() -> List[Dict]:
+def get_open_positions() -> Optional[List[Dict]]:
     """
     Fetch open positions.
     Returns: id, symbol, signal, size, entry_price, current_price,
              unrealized_pnl, sl, tp
+
+    Returns None (not an empty list) when the request fails, so callers can
+    tell "the broker is unreachable" apart from "there are no positions".
+    Treating a failure as empty would mark every live trade closed.
     """
     from config import from_epic
 
@@ -634,9 +638,11 @@ def get_open_positions() -> List[Dict]:
     cached = _cache_get(_positions_cache, "all", _POSITIONS_TTL)
     if cached is not None:
         return cached
+
     resp = _session.get("/api/v1/positions")
     if resp is None:
-        return []
+        logger.warning(f"[capital] positions fetch failed: {_last_error}")
+        return None
 
     try:
         positions = resp.json().get("positions", [])
@@ -672,7 +678,7 @@ def get_open_positions() -> List[Dict]:
 
     except Exception as e:
         logger.error(f"[capital] positions parse error: {e}")
-        return []
+        return None
 
 
 # ── Account balance ───────────────────────────────────────────────────────────
@@ -689,7 +695,8 @@ def get_capital_balance() -> Dict:
     Returns: {balance, profit_loss, deposit, available, currency, connected}
     """
     empty = {"balance": 0.0, "profit_loss": 0.0, "deposit": 0.0,
-             "available": 0.0, "currency": "USD", "connected": False}
+             "available": 0.0, "equity": 0.0, "free_margin": 0.0, "margin": 0.0,
+             "currency": "USD", "connected": False}
 
     global _balance_cache
     cached = _cache_get(_balance_cache, "bal", _BALANCE_TTL)
@@ -725,6 +732,10 @@ def get_capital_balance() -> Dict:
             "profit_loss": profit_loss,
             "deposit":     deposit,
             "available":   available,
+            # Equity = balance + unrealised P&L; the dashboard reads these
+            "equity":      balance + profit_loss,
+            "free_margin": available,
+            "margin":      max(0.0, balance - available),
             "currency":    a.get("currency", "USD"),
             "account_id":  a.get("accountId"),
             "account_name": a.get("accountName"),

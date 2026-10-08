@@ -164,9 +164,47 @@ KRONOS_MODEL_PATH  = os.getenv("KRONOS_MODEL_PATH", "NeoQuasar/Kronos-mini")
 KRONOS_TOKENIZER   = os.getenv("KRONOS_TOKENIZER",  "NeoQuasar/Kronos-Tokenizer-2k")
 
 # ── Forex Risk (separate from crypto) ──────────────────────────────────────────
-FOREX_MAX_RISK_PCT = env_float("FOREX_MAX_RISK_PCT", 0.02)  # 2% per trade
+# Risk per trade scales DOWN as the account gets smaller, because a fixed
+# percentage of a small balance cannot satisfy the broker's minimum order
+# size and would silently risk far more than intended.
+FOREX_MAX_RISK_PCT       = env_float("FOREX_MAX_RISK_PCT",       0.02)   # >= $500
+FOREX_MAX_RISK_PCT_MID   = env_float("FOREX_MAX_RISK_PCT_MID",   0.015)  # $200-$500
+FOREX_MAX_RISK_PCT_SMALL = env_float("FOREX_MAX_RISK_PCT_SMALL", 0.01)   # < $200
+FOREX_MID_ACCOUNT        = env_float("FOREX_MID_ACCOUNT",        500.0)
+FOREX_SMALL_ACCOUNT      = env_float("FOREX_SMALL_ACCOUNT",      200.0)
+
+# Smallest balance worth trading — below this the broker's minimum order
+# size forces more risk than the strategy is designed for.
+FOREX_MIN_TRADEABLE_BALANCE = env_float("FOREX_MIN_TRADEABLE_BALANCE", 50.0)
+
+# Hard ceiling on the risk a single trade may carry once the broker's minimum
+# order size is taken into account. On a very small account the minimum size
+# can imply far more risk than the target percentage, so the trade is skipped
+# rather than opened oversized.
+FOREX_MAX_IMPLIED_RISK_PCT = env_float("FOREX_MAX_IMPLIED_RISK_PCT", 0.05)  # 5%
+
 FOREX_MAX_TRADES   = env_int("FOREX_MAX_TRADES",   3)       # 3 max forex positions
 FOREX_MIN_CONF     = env_float("FOREX_MIN_CONF",   88.0)    # 88% minimum (refined CRT)
+
+# Halt new forex entries once the day's realised loss reaches this share of
+# the balance. Protects a small account from a losing streak.
+FOREX_DAILY_LOSS_LIMIT = env_float("FOREX_DAILY_LOSS_LIMIT", 0.06)   # 6%
+
+
+def forex_risk_pct(balance: float) -> float:
+    """
+    Risk-per-trade fraction for the given account balance.
+
+    Smaller accounts take proportionally less risk so that the broker's
+    minimum order size does not push realised risk far above the target.
+    """
+    if balance <= 0:
+        return FOREX_MAX_RISK_PCT_SMALL
+    if balance < FOREX_SMALL_ACCOUNT:
+        return FOREX_MAX_RISK_PCT_SMALL
+    if balance < FOREX_MID_ACCOUNT:
+        return FOREX_MAX_RISK_PCT_MID
+    return FOREX_MAX_RISK_PCT
 
 # ── Forex Leverage Tiers ───────────────────────────────────────────────────────
 FOREX_LEVERAGE_TIERS = {

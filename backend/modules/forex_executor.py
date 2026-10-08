@@ -64,7 +64,8 @@ def calculate_position_size(symbol: str, entry: float, sl: float,
     """
     Return a Capital.com order size in UNITS (not lots).
 
-    risk_amount = balance * FOREX_MAX_RISK_PCT
+    risk_pct    = forex_risk_pct(balance)  — scales down for small accounts
+    risk_amount = balance * risk_pct
     risk_pips   = |entry - sl| / pip_size
     lots        = risk_amount / (risk_pips * pip_value_per_lot)
     size        = lots * contract_size
@@ -75,13 +76,21 @@ def calculate_position_size(symbol: str, entry: float, sl: float,
     than the configured target — that is logged so it is never silent.
     """
     try:
-        from config import FOREX_MAX_RISK_PCT
+        from config import (forex_risk_pct, FOREX_MIN_TRADEABLE_BALANCE,
+                            FOREX_MAX_IMPLIED_RISK_PCT)
         from modules.market_data_forex import get_dealing_rules
 
         if balance <= 0:
-            balance = 10000.0
+            logger.warning(f"[capital] {symbol} no balance available — skipping")
+            return 0.0
 
-        risk_amount = balance * FOREX_MAX_RISK_PCT
+        if balance < FOREX_MIN_TRADEABLE_BALANCE:
+            logger.warning(f"[capital] {symbol} balance ${balance:.2f} below the "
+                           f"${FOREX_MIN_TRADEABLE_BALANCE:.0f} minimum — skipping")
+            return 0.0
+
+        risk_pct = forex_risk_pct(balance)
+        risk_amount = balance * risk_pct
 
         pip = _pip_size(symbol)
         pvpl = _pip_value_per_lot(symbol)
@@ -133,10 +142,23 @@ def calculate_position_size(symbol: str, entry: float, sl: float,
             logger.warning(f"[capital] {symbol} computed size is zero — skipping")
             return 0.0
 
+        # ── Final risk ceiling ───────────────────────────────────────────────
+        # The broker minimum can force a position far larger than the target
+        # risk. Refuse the trade rather than open something oversized.
+        implied_risk = (size / contract) * risk_pips * pvpl
+        implied_pct = implied_risk / balance if balance > 0 else 1.0
+        if implied_pct > FOREX_MAX_IMPLIED_RISK_PCT:
+            logger.warning(
+                f"[capital] {symbol} skipped — broker minimum size {size} implies "
+                f"${implied_risk:.2f} risk ({implied_pct*100:.1f}% of ${balance:.2f}), "
+                f"above the {FOREX_MAX_IMPLIED_RISK_PCT*100:.0f}% ceiling"
+            )
+            return 0.0
+
         logger.info(f"[capital] {symbol} size: {size} units "
-                    f"(={lots:.4f} lots, risk=${risk_amount:.2f} "
-                    f"stop={risk_pips:.1f}pips conf={confidence}% "
-                    f"min={min_size} inc={increment})")
+                    f"(={lots:.4f} lots, risk=${implied_risk:.2f} "
+                    f"@{risk_pct*100:.1f}% target, stop={risk_pips:.1f}pips "
+                    f"conf={confidence}% min={min_size} inc={increment})")
         return size
 
     except Exception as e:

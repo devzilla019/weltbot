@@ -432,7 +432,6 @@ def run_forex_entry_check():
                     if forex_block_log_once(symbol, reason):
                         print(f"[forex-entry] {symbol} blocked: {reason}")
                     continue
-
                 price = get_current_price(symbol)
                 if not price:
                     continue

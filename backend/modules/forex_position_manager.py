@@ -24,12 +24,27 @@ def check_forex_positions() -> None:
     TP1, close 50% of the position, move the stop to breakeven, and mark the
     trade as partially closed.
 
-    Trades no longer open on the broker (SL/TP hit) are marked CLOSED_EXTERNAL.
+    Trades genuinely no longer open on the broker (SL/TP hit) are marked
+    CLOSED_EXTERNAL. Reconciliation is skipped entirely when the broker call
+    fails, because an empty list is otherwise indistinguishable from "the
+    position is gone" and would close live trades in the database.
     """
     try:
-        from modules.market_data_forex import get_open_positions
+        from modules.market_data_forex import get_open_positions, get_session
+
+        # A rate-limit pause or an unreachable API must not be read as
+        # "no positions" — that would mark every live trade closed.
+        pause = get_session().rate_limit_remaining()
+        if pause > 0:
+            logger.info(f"[capital] reconciliation skipped — rate-limit pause "
+                        f"({pause:.0f}s)")
+            return
 
         positions = get_open_positions()
+        if positions is None:
+            logger.warning("[capital] reconciliation skipped — position fetch failed")
+            return
+
         live_ids = {str(p["id"]) for p in positions if p.get("id")}
 
         db = SessionLocal()
@@ -38,9 +53,14 @@ def check_forex_positions() -> None:
 
             for trade in open_trades:
                 did = str(trade.metaapi_position_id or "")
-                if did and did not in live_ids:
-                    # Closed on the broker side (SL/TP). Infer outcome from SL/TP.
-                    logger.info(f"[capital] trade {trade.id} ({trade.symbol}) closed externally")
+
+                if not did:
+                    # Never recorded a broker deal id — cannot reconcile safely.
+                    continue
+
+                if did not in live_ids:
+                    logger.info(f"[capital] trade {trade.id} ({trade.symbol}) "
+                                f"no longer open at broker — marking closed")
                     trade.outcome = "CLOSED_EXTERNAL"
                     trade.closed_at = datetime.utcnow()
                     db.commit()
@@ -138,6 +158,17 @@ def get_forex_position_summary() -> Dict:
         ).all()
 
         positions = get_open_positions()
+        # None means the broker call failed — the dashboard must show a
+        # clear "unavailable" state rather than an empty (but healthy) list.
+        if positions is None:
+            logger.warning("[capital] position summary — broker fetch failed")
+            return {
+                "open_count": 0, "open_positions": [], "total_pnl": 0,
+                "closed_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                "balance": 0.0, "unrealized": 0.0, "connected": False,
+                "stale": True,
+            }
+
         pos_map = {str(p["id"]): p for p in positions if p.get("id")}
 
         open_positions = []
@@ -191,6 +222,7 @@ def get_forex_position_summary() -> Dict:
             "open_count": 0, "open_positions": [], "total_pnl": 0,
             "closed_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
             "balance": 0.0, "unrealized": 0.0, "connected": False,
+            "stale": True,
         }
     finally:
         db.close()
@@ -198,10 +230,54 @@ def get_forex_position_summary() -> Dict:
 
 # ── Trade guards ──────────────────────────────────────────────────────────────
 
+def forex_daily_loss_check() -> Tuple[bool, str]:
+    """
+    True when today's realised forex loss has hit FOREX_DAILY_LOSS_LIMIT.
+
+    Protects the account from a losing streak. Without this the forex side
+    would keep opening trades no matter how much the day had already lost.
+    """
+    try:
+        from config import FOREX_DAILY_LOSS_LIMIT
+
+        db = SessionLocal()
+        try:
+            since = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            closed = db.query(ForexTrade).filter(
+                ForexTrade.outcome.in_(["WIN", "LOSS"]),
+                ForexTrade.closed_at >= since,
+            ).all()
+
+            if not closed:
+                return True, "OK"
+
+            pnl = sum(t.pnl or 0.0 for t in closed)
+
+            from modules.market_data_forex import get_capital_balance
+            balance = get_capital_balance().get("balance", 0.0) or 0.0
+            if balance <= 0:
+                return True, "OK"
+
+            if pnl < 0 and abs(pnl) >= balance * FOREX_DAILY_LOSS_LIMIT:
+                return False, (f"daily forex loss limit hit "
+                               f"(${pnl:.2f} of ${balance:.2f} balance)")
+            return True, "OK"
+        finally:
+            db.close()
+
+    except Exception as e:
+        logger.error(f"[capital] daily loss check error: {e}")
+        return True, "OK"
+
+
 def can_open_forex_trade(symbol: str) -> Tuple[bool, str]:
     """Check max-trades limit and whether this symbol already has an open trade."""
     try:
         from config import FOREX_MAX_TRADES
+
+        allowed, reason = forex_daily_loss_check()
+        if not allowed:
+            return False, reason
 
         db = SessionLocal()
         try:
