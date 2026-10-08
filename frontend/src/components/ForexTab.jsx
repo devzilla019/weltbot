@@ -47,8 +47,9 @@ export default function ForexTab(){
     </div>
   );
 
-  const{biases,crt_levels,positions,account,kronos_available,pairs}=data;
+  const{biases,crt_levels,positions,account,kronos_available,pairs,daily_risk}=data;
   const openPos=positions?.open_positions||[];
+  const risk=daily_risk;
 
   return(
     <div>
@@ -125,6 +126,78 @@ export default function ForexTab(){
           <div className="metric-sub"><span style={{color:"var(--buy)"}}>{positions?.wins||0}W</span> / <span style={{color:"var(--sell)"}}>{positions?.losses||0}L</span></div>
         </div>
       </div>
+
+      {risk&&(
+        <div className="glass" style={{padding:16,marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span className="sec-title" style={{fontSize:13}}>Daily Risk Budget</span>
+              {risk.halted
+                ? <span className="chip chip-bear" style={{fontSize:8,padding:"1px 6px"}}>HALTED</span>
+                : <span className="chip chip-bull" style={{fontSize:8,padding:"1px 6px"}}>ACTIVE</span>}
+              {!risk.tradeable&&<span className="chip chip-wait" style={{fontSize:8,padding:"1px 6px"}}>BALANCE TOO LOW</span>}
+            </div>
+            <div style={{fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)"}}>
+              resets 00:00 UTC
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(130px,1fr))",gap:8,marginBottom:12}}>
+            <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>RISK / TRADE</div>
+              <div style={{fontSize:14,fontFamily:"var(--font-mono)",color:"var(--lav-2)",fontWeight:600}}>
+                ${risk.risk_per_trade?.toFixed(2)}
+              </div>
+              <div style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>{risk.risk_pct}% of balance</div>
+            </div>
+            <div style={{background:"rgba(255,92,138,0.08)",border:"1px solid rgba(255,92,138,0.2)",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>TODAY'S P&L</div>
+              <div style={{fontSize:14,fontFamily:"var(--font-mono)",fontWeight:600,color:(risk.realised_pnl||0)>=0?"var(--buy)":"var(--sell)"}}>
+                {(risk.realised_pnl||0)>=0?"+":""}${(risk.realised_pnl||0).toFixed(2)}
+              </div>
+              <div style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>{risk.trades_today||0} closed today</div>
+            </div>
+            <div style={{background:"rgba(245,185,66,0.08)",border:"1px solid rgba(245,185,66,0.2)",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>LOSS BUDGET LEFT</div>
+              <div style={{fontSize:14,fontFamily:"var(--font-mono)",fontWeight:600,color:"var(--warn)"}}>
+                ${risk.remaining_budget?.toFixed(2)}
+              </div>
+              <div style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>of ${risk.daily_limit_amount?.toFixed(2)} ({risk.daily_limit_pct}%)</div>
+            </div>
+            <div style={{background:"var(--surface2)",border:"1px solid var(--border)",borderRadius:6,padding:"8px 10px"}}>
+              <div style={{fontSize:8,color:"var(--text3)",fontFamily:"var(--font-mono)",letterSpacing:"0.08em"}}>OPEN</div>
+              <div style={{fontSize:14,fontFamily:"var(--font-mono)",color:"var(--text)",fontWeight:600}}>{risk.open_positions||0}</div>
+              <div style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>max risk {risk.max_implied_risk_pct}%/trade</div>
+            </div>
+          </div>
+
+          {/* Loss budget meter */}
+          <div style={{height:6,background:"var(--surface2)",borderRadius:3,overflow:"hidden"}}>
+            <div style={{
+              height:"100%",
+              borderRadius:3,
+              width:`${Math.min(100,Math.max(0,100-(risk.remaining_pct||0)))}%`,
+              background:risk.halted?"var(--sell)":(risk.remaining_pct<40?"var(--warn)":"var(--buy)"),
+              transition:"width 0.6s ease",
+            }}/>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:5,fontSize:9,fontFamily:"var(--font-mono)",color:"var(--text3)"}}>
+            <span>{risk.remaining_pct}% budget remaining</span>
+            <span>{risk.loss_used>0?`-$${risk.loss_used.toFixed(2)} used`:""}</span>
+          </div>
+
+          {risk.halted&&(
+            <div className="info-box info-box-red" style={{marginTop:10}}>
+              Daily loss limit reached — new forex entries are halted until 00:00 UTC.
+            </div>
+          )}
+          {!risk.tradeable&&!risk.halted&&(
+            <div className="info-box info-box-warn" style={{marginTop:10}}>
+              Balance ${risk.balance?.toFixed(2)} is below the ${risk.min_balance} minimum — entries will be skipped.
+            </div>
+          )}
+        </div>
+      )}
 
       {cascade&&cascade.chains?.length>0&&(
         <>

@@ -11,6 +11,80 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/forex", tags=["forex"])
 
 
+def _forex_daily_risk() -> Dict:
+    """
+    Today's realised forex risk budget, for the dashboard panel.
+
+    Returns the day's realised P&L, the loss limit, how much budget is left
+    and whether new entries are currently halted.
+    """
+    try:
+        from config import (FOREX_DAILY_LOSS_LIMIT, FOREX_MIN_TRADEABLE_BALANCE,
+                            FOREX_MAX_IMPLIED_RISK_PCT, forex_risk_pct)
+        from database import SessionLocal
+        from models import ForexTrade
+        from modules.market_data_forex import get_capital_balance
+
+        balance = get_capital_balance().get("balance", 0.0) or 0.0
+
+        db = SessionLocal()
+        try:
+            since = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+            closed = db.query(ForexTrade).filter(
+                ForexTrade.outcome.in_(["WIN", "LOSS"]),
+                ForexTrade.closed_at >= since,
+            ).all()
+
+            realised = sum(t.pnl or 0.0 for t in closed)
+            wins = len([t for t in closed if t.outcome == "WIN"])
+            losses = len([t for t in closed if t.outcome == "LOSS"])
+
+            open_count = db.query(ForexTrade).filter(ForexTrade.outcome == "OPEN").count()
+
+            open_unrealised = sum(
+                (t.pnl or 0.0) for t in
+                db.query(ForexTrade).filter(ForexTrade.outcome == "OPEN").all()
+            )
+        finally:
+            db.close()
+
+        limit_amount = balance * FOREX_DAILY_LOSS_LIMIT
+        loss_used = abs(min(0.0, realised))
+        remaining = max(0.0, limit_amount - loss_used)
+        halted = loss_used >= limit_amount and limit_amount > 0
+
+        return {
+            "balance":              round(balance, 2),
+            "risk_pct":             round(forex_risk_pct(balance) * 100, 2),
+            "risk_per_trade":       round(balance * forex_risk_pct(balance), 2),
+            "daily_limit_pct":      round(FOREX_DAILY_LOSS_LIMIT * 100, 2),
+            "daily_limit_amount":   round(limit_amount, 2),
+            "realised_pnl":         round(realised, 2),
+            "loss_used":            round(loss_used, 2),
+            "remaining_budget":     round(remaining, 2),
+            "remaining_pct":        round((remaining / limit_amount * 100) if limit_amount else 0.0, 1),
+            "halted":               halted,
+            "trades_today":         wins + losses,
+            "wins_today":           wins,
+            "losses_today":         losses,
+            "open_positions":       open_count,
+            "max_implied_risk_pct": round(FOREX_MAX_IMPLIED_RISK_PCT * 100, 2),
+            "min_balance":          FOREX_MIN_TRADEABLE_BALANCE,
+            "tradeable":            balance >= FOREX_MIN_TRADEABLE_BALANCE,
+        }
+
+    except Exception as e:
+        logger.error(f"[forex-api] daily risk error: {e}")
+        return {}
+
+
+@router.get("/daily-risk")
+def forex_daily_risk() -> Dict:
+    """Today's forex risk budget: realised P&L vs the daily loss limit."""
+    return _forex_daily_risk()
+
+
 @router.get("/status")
 def forex_status() -> Dict:
     """
@@ -48,7 +122,8 @@ def forex_status() -> Dict:
             'biases': biases,
             'crt_levels': levels,
             'positions': position_summary,
-            'account': account
+            'account': account,
+            'daily_risk': _forex_daily_risk(),
         }
         
     except Exception as e:

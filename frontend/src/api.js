@@ -44,4 +44,5 @@ export const forexApi = {
   testConnection: ()     => req("GET",  "/api/forex/test-connection"),
   kronosStatus:   ()     => req("GET",  "/api/forex/kronos-status"),
   cascadeStats:   ()     => req("GET",  "/api/forex/cascade-stats"),
+  dailyRisk:      ()     => req("GET",  "/api/forex/daily-risk"),
 };
