@@ -12,7 +12,16 @@ from routers import signals, trades, analytics, forex, crypto_strategy
 # from routers import auth
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
 from datetime import datetime
-import json, os, threading
+import json, logging, os, threading
+
+# Without this, every logger.info()/logger.warning() call in the modules is
+# silently discarded — uvicorn only configures its own loggers, so the CRT
+# trend/sweep/entry diagnostics never reached the Railway logs.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
 
 Base.metadata.create_all(bind=engine)
 run_light_migrations()
@@ -195,7 +204,7 @@ def level2_entry_check():
         if balance < 1.0:
             return
 
-        from modules.signal_engine     import check_entry_for_setup
+        from modules.signal_engine     import check_entry_for_setup, refresh_btc_eth_crt_entry
         from modules.position_manager  import daily_drawdown_check
 
         if daily_drawdown_check():
@@ -218,6 +227,15 @@ def level2_entry_check():
                         placed += 1
                     _active_setups.pop(symbol, None)
                     continue
+
+                # Refined CRT pullback setups (BTC/ETH) use their own entry
+                # logic — the legacy SMC path expects 'bos'/'fib'/'ob' keys.
+                if setup.get("crt_pullback"):
+                    sig = refresh_btc_eth_crt_entry(setup)
+                    if sig and _place_trade(sig, balance, db):
+                        placed += 1
+                    continue
+
                 sig = check_entry_for_setup(setup)
                 if sig:
                     if _place_trade(sig, balance, db):

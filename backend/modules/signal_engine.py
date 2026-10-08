@@ -521,6 +521,47 @@ def scan_btc_eth_crt(symbol: str) -> dict | None:
         return None
 
 
+def refresh_btc_eth_crt_entry(setup: dict) -> dict | None:
+    """
+    Re-evaluate the refined CRT entry for a live BTC/ETH setup.
+
+    The L1 scan runs every 15 minutes but the entry check runs every 60
+    seconds, so a setup whose trigger appears between scans must be able to
+    fire without waiting. Returns a crypto signal dict, or None if the
+    entry trigger is not live yet.
+    """
+    try:
+        from modules.forex_signal_engine import (check_entry_condition_refined,
+                                                 calculate_atr)
+
+        symbol = setup.get("symbol")
+        trend = setup.get("trend_direction")
+        if not symbol or trend not in ("BULLISH", "BEARISH"):
+            return None
+
+        df15 = _crt_candles(symbol, "15m", 100)
+        df5 = _crt_candles(symbol, "5m", 100)
+        entry_df = df5 if (df5 is not None and len(df5)) else df15
+        if entry_df is None or len(entry_df) == 0:
+            return None
+
+        price = float(entry_df["close"].iloc[-1])
+        atr = calculate_atr(entry_df)
+        setup["entry_timeframe"] = "5m" if entry_df is df5 else "15m"
+
+        signal = check_entry_condition_refined(setup, price, df15, df5, trend)
+        if signal and signal["confidence"] >= _CRT_MIN_CONF:
+            print(f"[crypto-crt] {symbol} ENTRY {signal['signal']} @ "
+                  f"{signal['entry_price']:.2f} | {signal['entry_type']} | "
+                  f"conf={signal['confidence']}%")
+            return _crt_signal_to_crypto(signal, price, atr)
+        return None
+
+    except Exception as e:
+        print(f"[crypto-crt] {setup.get('symbol')} refresh error: {e}")
+        return None
+
+
 def scan_for_bos(symbol: str) -> dict | None:
     """
     Full SMC scan with ALL validations.

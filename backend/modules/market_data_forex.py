@@ -29,8 +29,8 @@ _POSITIONS_TTL = 5.0
 
 _candle_cache:    Dict[str, Tuple[float, Optional[pd.DataFrame]]] = {}
 _price_cache:     Dict[str, Tuple[float, float]] = {}
-_balance_cache:   Tuple[float, Optional[Dict]] = (0.0, None)
-_positions_cache: Tuple[float, Optional[List[Dict]]] = (0.0, None)
+_balance_cache:   Dict[str, Tuple[float, Optional[Dict]]] = {}
+_positions_cache: Dict[str, Tuple[float, Optional[List[Dict]]]] = {}
 
 _cache_lock = threading.Lock()
 
@@ -54,12 +54,11 @@ def _cache_put(store: dict, key: str, value) -> None:
 
 def clear_caches() -> None:
     """Drop every cached response (used by the Test Connection button)."""
-    global _balance_cache, _positions_cache
     with _cache_lock:
         _candle_cache.clear()
         _price_cache.clear()
-        _balance_cache = (0.0, None)
-        _positions_cache = (0.0, None)
+        _balance_cache.clear()
+        _positions_cache.clear()
 
 # ── Resolution mapping (bot format -> Capital.com resolution) ─────────────────
 _RES_MAP = {
@@ -591,7 +590,6 @@ def get_open_positions() -> List[Dict]:
     cached = _cache_get(_positions_cache, "all", _POSITIONS_TTL)
     if cached is not None:
         return cached
-
     resp = _session.get("/api/v1/positions")
     if resp is None:
         return []
@@ -717,11 +715,14 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
 
     resp = _session.post("/api/v1/positions", body)
     if resp is None:
-        # An unknown epic surfaces here as a 400 — rediscover and retry once
-        note_epic_failure(symbol)
-        epic = resolve_epic(symbol, refresh=True)
-        body["epic"] = epic
-        resp = _session.post("/api/v1/positions", body)
+        # Only a rejected EPIC warrants rediscovery — a bad size, closed
+        # market or auth failure must not invalidate a perfectly good epic.
+        err = (_last_error or "").lower()
+        if "epic" in err or "instrument" in err:
+            note_epic_failure(symbol)
+            epic = resolve_epic(symbol, refresh=True)
+            body["epic"] = epic
+            resp = _session.post("/api/v1/positions", body)
         if resp is None:
             return {"success": False, "error": _last_error or "order request failed"}
 
