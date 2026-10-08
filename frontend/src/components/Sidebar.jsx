@@ -3,8 +3,9 @@ import{useApp}from"../context/AppContext";
 
 const NAV=[
   {section:"Trading"},
+  {id:"control", label:"Control Room",icon:"◉"},
   {id:"overview",label:"Dashboard",icon:"◈"},
-  {id:"signals", label:"Signals",  icon:"◉"},
+  {id:"signals", label:"Signals",  icon:"◎"},
   {id:"trades",  label:"Trades",   icon:"▤"},
   {section:"Markets"},
   {id:"forex",   label:"Forex & Metals",icon:"◆"},

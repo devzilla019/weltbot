@@ -3,6 +3,7 @@ import{useApp}from"../context/AppContext";
 import{makeApi}from"../api";
 import Sidebar from"../components/Sidebar";
 import DisclaimerBanner from"../components/DisclaimerBanner";
+import ControlRoom from"../components/ControlRoom";
 import OverviewTab from"../components/OverviewTab";
 import SignalsTab from"../components/SignalsTab";
 import TradesTab from"../components/TradesTab";
@@ -12,7 +13,7 @@ import BuiltBy from"../components/BuiltBy";
 export default function Dashboard(){
   const{token,showToast}=useApp();
   const api=makeApi(token);
-  const[tab,setTab]=useState("overview");
+  const[tab,setTab]=useState("control");
   const[botStatus,setBotStatus]=useState(null);
   const[signals,setSignals]=useState([]);
   const[trades,setTrades]=useState([]);
@@ -52,8 +53,8 @@ export default function Dashboard(){
     }catch{showToast("Close all failed","error");}
   };
   const ctx={botStatus,signals,trades,summary,portfolio,loading,actionLoad,lastUpdate,backendDown,handleStart,handleStop,handleScan,handleCloseTrade,handleClearTrades,handleCloseAll,refresh:load};
-  const TITLES={overview:["Dashboard","Portfolio overview & live signals"],signals:["Signals","Structure signals across all markets"],trades:["Trades","Full trade history & performance"],forex:["Forex & Metals","CRT + SMC + Kronos AI · Capital.com"],crypto:["Crypto","Kronos + CRT + SMC · Binance futures"]};
-  const[title,subtitle]=TITLES[tab]||TITLES.overview;
+  const TITLES={control:["Control Room","Live positions · risk · session windows"],overview:["Dashboard","Portfolio overview & live signals"],signals:["Signals","Structure signals across all markets"],trades:["Trades","Full trade history & performance"],forex:["Forex & Metals","CRT + SMC + Kronos AI · Capital.com"],crypto:["Crypto","Kronos + CRT + SMC · Binance futures"]};
+  const[title,subtitle]=TITLES[tab]||TITLES.control;
   const isLive=botStatus?.running&&!botStatus?.paused;
   return(
     <div className="app-shell">
@@ -80,6 +81,7 @@ export default function Dashboard(){
         </div>
         {backendDown&&<div style={{background:"rgba(255,92,138,0.08)",border:"1px solid rgba(255,92,138,0.2)",padding:"10px 24px",fontSize:11,color:"var(--sell)",fontFamily:"var(--font-mono)",display:"flex",alignItems:"center",gap:8}}>⚠ Backend unreachable — check Railway<button onClick={()=>load()} style={{marginLeft:"auto",fontSize:10,padding:"3px 10px",background:"rgba(255,92,138,0.1)",border:"1px solid rgba(255,92,138,0.3)",color:"var(--sell)",borderRadius:4,cursor:"pointer"}}>Retry</button></div>}
         <div className="page-body animate-in" key={tab}>
+          {tab==="control"&&<ControlRoom/>}
           {tab==="overview"&&<OverviewTab {...ctx}/>}
           {tab==="signals"&&<SignalsTab {...ctx}/>}
           {tab==="trades"&&<TradesTab {...ctx}/>}
