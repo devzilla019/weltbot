@@ -28,9 +28,10 @@ export default function ControlRoom(){
   const unrealised=positions.reduce((s,p)=>s+(p.pnl||0),0);
 
   const closed=live.forexTrades.filter(t=>t.outcome!=="OPEN");
-  const realised=closed.reduce((s,t)=>s+(t.pnl||0),0);
-  const wins=closed.filter(t=>t.outcome==="WIN").length;
-  const winRate=closed.length?Math.round(wins/closed.length*100):0;
+  const withPnl=closed.filter(t=>t.pnl!=null);
+  const realised=withPnl.reduce((s,t)=>s+(t.pnl||0),0);
+  const wins=withPnl.filter(t=>t.pnl>0).length;
+  const winRate=withPnl.length?Math.round(wins/withPnl.length*100):0;
 
   const isLive=live.botStatus?.running&&!live.botStatus?.paused;
 
@@ -118,17 +119,19 @@ export default function ControlRoom(){
         <div className="cr-metric">
           <label>Realised</label>
           <b style={{color:(realised||0)>=0?"var(--buy)":"var(--sell)"}}>{fmtMoney(realised)}</b>
-          <em>{closed.length} closed</em>
+          <em>{withPnl.length} closed{closed.length>withPnl.length?` · ${closed.length-withPnl.length} unknown`:""}</em>
         </div>
         <div className="cr-metric">
           <label>Win rate</label>
-          <b style={{color:winRate>=50?"var(--buy)":"var(--sell)"}}>{winRate}%</b>
-          <em>{wins}W / {closed.length-wins}L</em>
+          <b style={{color:closed.length===0?"var(--text3)":winRate>=50?"var(--buy)":"var(--sell)"}}>
+            {closed.length===0?"—":`${winRate}%`}
+          </b>
+          <em>{closed.length===0?"no closed trades":`${wins}W / ${closed.length-wins}L`}</em>
         </div>
         <div className="cr-metric">
           <label>Equity</label>
           <b>{fmtMoney(live.forex?.account?.equity??live.botStatus?.forex_equity,false)}</b>
-          <em>balance {fmtMoney(live.forex?.account?.balance,false)}</em>
+          <em>balance {fmtMoney(live.forex?.account?.balance??live.botStatus?.forex_balance,false)}</em>
         </div>
       </div>
 
@@ -165,18 +168,22 @@ export default function ControlRoom(){
             <div className="activity">
               {closed.length===0
                 ?<div className="cr-empty small"><em>No closed trades yet</em></div>
-                :closed.slice(0,8).map(t=>(
+                :closed.slice(0,8).map(t=>{
+                  const has= t.pnl!=null;
+                  const up = has && t.pnl>=0;
+                  return(
                   <div key={t.id} className="activity-row">
-                    <span className={`activity-dot ${(t.pnl||0)>=0?"win":"loss"}`}/>
+                    <span className={`activity-dot ${has?(up?"win":"loss"):"unknown"}`}/>
                     <span className="activity-sym">{t.symbol}</span>
                     <span className={`chip ${t.signal==="BUY"?"chip-bull":"chip-bear"}`}>{t.signal}</span>
                     <span className="activity-pnl mono"
-                          style={{color:(t.pnl||0)>=0?"var(--buy)":"var(--sell)"}}>
-                      {fmtMoney(t.pnl)}
+                          style={{color:has?(up?"var(--buy)":"var(--sell)"):"var(--text3)"}}>
+                      {has?fmtMoney(t.pnl):"—"}
                     </span>
                     <span className="activity-time">{relTime(t.closed)}</span>
                   </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
         </div>

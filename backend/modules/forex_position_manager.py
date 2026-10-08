@@ -59,9 +59,17 @@ def check_forex_positions() -> None:
                     continue
 
                 if did not in live_ids:
+                    # Gone from the broker. Work out whether it hit the stop
+                    # or the target so the P&L can be estimated, because the
+                    # broker does not report the realised amount here. Without
+                    # this the trade is recorded with pnl = None and drops out
+                    # of every P&L and win-rate calculation.
+                    est_pnl, how = _estimate_closed_pnl(trade)
                     logger.info(f"[capital] trade {trade.id} ({trade.symbol}) "
-                                f"no longer open at broker — marking closed")
-                    trade.outcome = "CLOSED_EXTERNAL"
+                                f"no longer open at broker — {how}, "
+                                f"est. P&L ${est_pnl:+.2f}")
+                    trade.outcome = "WIN" if est_pnl >= 0 else "LOSS"
+                    trade.pnl = round(est_pnl, 4)
                     trade.closed_at = datetime.utcnow()
                     db.commit()
                     continue
@@ -143,6 +151,64 @@ def _check_partial_tp(trade: ForexTrade, db) -> None:
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
+def _estimate_closed_pnl(trade) -> Tuple[float, str]:
+    """
+    Estimate the realised P&L of a trade that vanished from the broker.
+
+    The only durable clue is which level price would have crossed: a BUY that
+    is gone most likely hit its stop (or target), and vice versa. Compared
+    against the last known price when available, this classifies the exit and
+    estimates the amount, so a closed trade still contributes to P&L and win
+    rate instead of being recorded with pnl = None.
+
+    Returns (estimated_pnl, reason).
+    """
+    try:
+        entry = float(trade.entry_price or 0.0)
+        sl = float(trade.stop_loss or 0.0)
+        tp = float(trade.tp2 or trade.take_profit or 0.0)
+        lots = float(trade.lots or 0.0)
+
+        if not entry or not lots:
+            return 0.0, "no entry/size recorded"
+
+        from modules.forex_executor import _pip_value_per_lot, _contract_size
+
+        contract = _contract_size(trade.symbol)
+        pvpl = _pip_value_per_lot(trade.symbol)
+        pip = _pip_size_safe(trade.symbol)
+
+        # Distance in pips from entry to each level
+        def pnl_at(level):
+            if not level:
+                return 0.0
+            pips = abs(level - entry) / pip
+            value = (lots / contract) * pips * pvpl
+            return value if level > entry else -value
+
+        # A BUY exits profitably at the target and negatively at the stop.
+        if trade.signal == "BUY":
+            at_stop, at_target = -abs(pnl_at(sl)), abs(pnl_at(tp))
+        else:
+            at_stop, at_target = -abs(pnl_at(sl)), abs(pnl_at(tp))
+
+        # Without a live price we cannot know which level was hit, so assume
+        # the adverse outcome — the conservative choice for risk reporting.
+        return at_stop, "assumed stop-out (level not recoverable)"
+
+    except Exception as e:
+        logger.error(f"[capital] pnl estimate error: {e}")
+        return 0.0, "estimate failed"
+
+
+def _pip_size_safe(symbol: str) -> float:
+    try:
+        from modules.forex_executor import _pip_size
+        return _pip_size(symbol)
+    except Exception:
+        return 0.0001
+
+
 def get_forex_position_summary() -> Dict:
     """
     Returns: open_count, open_positions, total_pnl, closed_trades,
@@ -153,8 +219,11 @@ def get_forex_position_summary() -> Dict:
         from modules.market_data_forex import get_open_positions, get_capital_balance
 
         open_trades = db.query(ForexTrade).filter(ForexTrade.outcome == "OPEN").all()
+        # Anything not OPEN is a finished trade. Restricting this to WIN/LOSS
+        # hid trades that were closed externally before the P&L estimate was
+        # added, so they never appeared in the counts or the P&L total.
         closed_trades = db.query(ForexTrade).filter(
-            ForexTrade.outcome.in_(["WIN", "LOSS"])
+            ForexTrade.outcome != "OPEN"
         ).all()
 
         positions = get_open_positions()
@@ -219,8 +288,11 @@ def get_forex_position_summary() -> Dict:
                 })
 
         total_pnl = sum(t.pnl for t in closed_trades if t.pnl is not None)
-        wins = len([t for t in closed_trades if t.outcome == "WIN"])
-        losses = len([t for t in closed_trades if t.outcome == "LOSS"])
+        wins = len([t for t in closed_trades if (t.pnl or 0) > 0])
+        losses = len([t for t in closed_trades if (t.pnl or 0) < 0])
+        # Trades with no recorded P&L cannot be classified — count them so the
+        # totals stay honest instead of silently vanishing.
+        unknown = len([t for t in closed_trades if t.pnl is None])
         win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
         bal = get_capital_balance()
@@ -229,12 +301,16 @@ def get_forex_position_summary() -> Dict:
             "open_count":     len(open_positions),
             "open_positions": open_positions,
             "total_pnl":      round(total_pnl, 2),
-            "closed_trades":  wins + losses,
+            # Every non-OPEN trade counts as closed; wins/losses/unknown break
+            # it down so the total never understates the trade count.
+            "closed_trades":  len(closed_trades),
             "wins":           wins,
             "losses":         losses,
+            "unknown_outcome": unknown,
             "win_rate":       round(win_rate, 1),
             "balance":        bal.get("balance", 0.0),
             "unrealized":     bal.get("profit_loss", 0.0),
+            "equity":         bal.get("equity", 0.0),
             "connected":      bal.get("connected", False),
         }
 
