@@ -45,4 +45,7 @@ export const forexApi = {
   kronosStatus:   ()     => req("GET",  "/api/forex/kronos-status"),
   cascadeStats:   ()     => req("GET",  "/api/forex/cascade-stats"),
   dailyRisk:      ()     => req("GET",  "/api/forex/daily-risk"),
+  closeTrade:     (id)   => req("POST", `/api/forex/trade/${id}/close`),
+  closeAll:       ()     => req("POST", "/api/forex/close-all"),
+  clearTrades:    ()     => req("DELETE","/api/forex/trades/clear"),
 };

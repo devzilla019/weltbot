@@ -1,8 +1,13 @@
 import{useState,useEffect}from"react";
 import CRTSignalCard from"./CRTSignalCard";
 import{forexApi}from"../api";
+import{useApp}from"../context/AppContext";
+
+const fmtMoney=v=>`${v>=0?"+":""}$${Math.abs(v||0).toFixed(2)}`;
+const fmtP=v=>v==null?"—":Number(v).toFixed(5);
 
 export default function ForexTab(){
+  const{showToast}=useApp();
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(true);
   const[err,setErr]=useState(null);
@@ -10,12 +15,41 @@ export default function ForexTab(){
   const[testing,setTesting]=useState(false);
   const[kronos,setKronos]=useState(null);
   const[cascade,setCascade]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[history,setHistory]=useState([]);
 
   const load=async()=>{
-    try{const d=await forexApi.getStatus();setData(d);setErr(null);}
+    try{
+      const d=await forexApi.getStatus();
+      setData(d);setErr(null);
+      forexApi.getTrades(30).then(setHistory).catch(()=>{});
+    }
     catch(e){setErr(e.message);}
     finally{setLoading(false);}
   };
+
+  const handleClose=async(id)=>{
+    setBusy(true);
+    try{
+      const r=await forexApi.closeTrade(id);
+      if(r.success){showToast(`Closed ${r.symbol} · P&L ${fmtMoney(r.pnl)}`,"success");await load();}
+      else showToast(r.error||"Close failed","error");
+    }catch(e){showToast(e.message||"Close failed","error");}
+    finally{setBusy(false);}
+  };
+
+  const handleCloseAll=async()=>{
+    setBusy(true);
+    try{
+      const r=await forexApi.closeAll();
+      if(r.failed>0&&r.closed===0) showToast(r.error||"Close all failed","error");
+      else showToast(`Closed ${r.closed} position${r.closed===1?"":"s"} · P&L ${fmtMoney(r.total_pnl)}`,
+                     r.failed>0?"warn":"success");
+      await load();
+    }catch(e){showToast(e.message||"Close all failed","error");}
+    finally{setBusy(false);}
+  };
+
   useEffect(()=>{
     load();
     forexApi.kronosStatus().then(setKronos).catch(()=>{});
@@ -50,6 +84,19 @@ export default function ForexTab(){
   const{biases,crt_levels,positions,account,kronos_available,pairs,daily_risk}=data;
   const openPos=positions?.open_positions||[];
   const risk=daily_risk;
+  const totalOpenPnl=openPos.reduce((s,p)=>s+(p.pnl||0),0);
+  const closedTrades=history.filter(t=>t.outcome!=="OPEN");
+  const closedPnl=closedTrades.reduce((s,t)=>s+(t.pnl||0),0);
+
+  const handleClearHistory=async()=>{
+    setBusy(true);
+    try{
+      const r=await forexApi.clearTrades();
+      if(r.success){showToast(`Cleared ${r.deleted} closed trades`,"success");await load();}
+      else showToast(r.error||"Clear failed","error");
+    }catch(e){showToast(e.message||"Clear failed","error");}
+    finally{setBusy(false);}
+  };
 
   return(
     <div>
@@ -242,41 +289,80 @@ export default function ForexTab(){
 
       {openPos.length>0&&(
         <>
-          <div className="sec-head"><div className="sec-title">Open Positions</div><div className="sec-sub">{openPos.length} live</div></div>
-          <div className="grid-pairs" style={{marginBottom:8}}>
-            {openPos.map(p=>(
-              <div key={p.id} className={`pair-card ${p.signal==="BUY"?"buy":"sell"}`}>
-                <div className="pair-head">
-                  <div className="pair-symbol">{p.symbol}</div>
-                  <span className={`chip ${p.signal==="BUY"?"chip-bull":"chip-bear"}`}><span className="chip-dot pulse"/>{p.signal}</span>
-                </div>
-                <div className="pair-price-label">Live P&L</div>
-                <div className="pair-price" style={{color:p.pnl>=0?"var(--buy)":"var(--sell)"}}>
-                  {p.pnl>=0?"+":""}${p.pnl?.toFixed(2)}
-                </div>
-                <div className="range-labels" style={{marginTop:10}}>
-                  <span>Entry {p.entry?.toFixed(5)}</span>
-                  <span>Now {p.current?.toFixed(5)}</span>
-                </div>
-                <div className="range-labels" style={{marginTop:4}}>
-                  <span style={{color:"var(--sell)"}}>SL {p.sl?.toFixed(5)}</span>
-                  <span style={{color:"var(--buy)"}}>TP {p.tp?.toFixed(5)}</span>
-                </div>
-                {(p.tp1!=null||p.tp2!=null)&&(
-                  <div className="range-labels" style={{marginTop:4}}>
-                    <span style={{color:"var(--warn)"}}>TP1 {p.tp1?.toFixed(5)??"—"}</span>
-                    <span style={{color:"var(--buy)"}}>TP2 {(p.tp2??p.tp)?.toFixed(5)??"—"}</span>
-                  </div>
-                )}
-                <div style={{display:"flex",gap:6,marginTop:10,flexWrap:"wrap"}}>
-                  <span className="chip chip-live">{p.lots} lots</span>
-                  <span className="chip chip-neutral">{p.confidence}%</span>
-                  <span className="chip chip-neutral">{p.kronos_bias}</span>
-                  {p.entry_type&&<span className="chip chip-bull">{p.entry_type}</span>}
-                  {p.partial_tp_hit&&<span className="chip chip-bull">50% closed</span>}
-                </div>
-              </div>
-            ))}
+          <div className="sec-head">
+            <div className="sec-title">Open Positions</div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span className="sec-sub">{openPos.length} live · {fmtMoney(totalOpenPnl)} unrealised</span>
+              <button
+                className="btn btn-danger btn-sm"
+                disabled={busy}
+                onClick={handleCloseAll}
+                title="Close every open forex position">
+                ✕ Close All
+              </button>
+            </div>
+          </div>
+          <div className="glass" style={{padding:0,marginBottom:16,overflow:"hidden"}}>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th>
+                    <th>Last Price</th><th>Stop Loss</th><th>Take Profit</th>
+                    <th>P&L</th><th>Progress</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openPos.map(p=>{
+                    const up=(p.pnl||0)>=0;
+                    return(
+                      <tr key={p.id}>
+                        <td>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:12}}>{p.symbol}</span>
+                            {p.entry_type&&<span className="chip chip-live" style={{fontSize:8,padding:"1px 5px"}}>{p.entry_type}</span>}
+                            {p.partial_tp_hit&&<span className="chip chip-bull" style={{fontSize:8,padding:"1px 5px"}}>50% closed</span>}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`chip ${p.signal==="BUY"?"chip-bull":"chip-bear"}`} style={{fontSize:8,padding:"1px 6px"}}>
+                            {p.signal}
+                          </span>
+                        </td>
+                        <td className="mono">{Number(p.size||0).toLocaleString()}</td>
+                        <td className="mono">{fmtP(p.entry)}</td>
+                        <td className="mono" style={{color:up?"var(--buy)":"var(--sell)"}}>{fmtP(p.current)}</td>
+                        <td className="mono" style={{color:"var(--sell)"}}>{fmtP(p.sl)}</td>
+                        <td className="mono" style={{color:"var(--buy)"}}>{fmtP(p.tp2??p.tp)}</td>
+                        <td className="mono" style={{color:up?"var(--buy)":"var(--sell)",fontWeight:600}}>
+                          {up?"+":""}${(p.pnl||0).toFixed(2)}
+                          <div style={{fontSize:9,color:"var(--text3)",fontWeight:400}}>
+                            {up?"+":""}{(p.pnl_pct||0).toFixed(3)}%
+                          </div>
+                        </td>
+                        <td style={{minWidth:70}}>
+                          <div style={{height:4,background:"var(--surface2)",borderRadius:2,overflow:"hidden"}}>
+                            <div style={{height:"100%",borderRadius:2,width:`${p.progress||0}%`,
+                              background:up?"var(--buy)":"var(--sell)",transition:"width 0.6s ease"}}/>
+                          </div>
+                          <div style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)",marginTop:3}}>
+                            {(p.progress||0).toFixed(0)}% · R:R 1:{p.risk_reward||0}
+                          </div>
+                        </td>
+                        <td>
+                          <button
+                            className="btn btn-danger btn-xs"
+                            disabled={busy}
+                            onClick={()=>handleClose(p.id)}>
+                            Close
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         </>
       )}
@@ -291,6 +377,64 @@ export default function ForexTab(){
           <CRTSignalCard key={sym} symbol={sym} index={i} bias={biases?.[sym]} levels={crt_levels?.[sym]}/>
         ))}
       </div>
+
+      {history.filter(t=>t.outcome!=="OPEN").length>0&&(
+        <>
+          <div className="sec-head" style={{marginTop:20}}>
+            <div className="sec-title">Closed Trades</div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span className="sec-sub">
+                {closedTrades.length} closed · {fmtMoney(closedPnl)} realised
+              </span>
+              <button
+                className="btn btn-sm"
+                disabled={busy}
+                onClick={handleClearHistory}
+                title="Clear closed trade history">
+                Clear
+              </button>
+            </div>
+          </div>
+          <div className="glass" style={{padding:0,marginBottom:16,overflow:"hidden"}}>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th>
+                    <th>Type</th><th>Conf</th><th>P&L</th><th>Closed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {closedTrades.map(t=>{
+                    const up=(t.pnl||0)>=0;
+                    return(
+                      <tr key={t.id}>
+                        <td style={{fontFamily:"var(--font-display)",fontWeight:700,fontSize:12}}>{t.symbol}</td>
+                        <td>
+                          <span className={`chip ${t.signal==="BUY"?"chip-bull":"chip-bear"}`} style={{fontSize:8,padding:"1px 6px"}}>
+                            {t.signal}
+                          </span>
+                        </td>
+                        <td className="mono">{fmtP(t.entry)}</td>
+                        <td className="mono">{t.pnl!=null?fmtP(t.tp2??t.tp):"—"}</td>
+                        <td>{t.entry_type&&<span className="chip chip-live" style={{fontSize:8,padding:"1px 5px"}}>{t.entry_type}</span>}</td>
+                        <td className="mono">{(t.confidence||0).toFixed(0)}%</td>
+                        <td className="mono" style={{color:up?"var(--buy)":"var(--sell)",fontWeight:600}}>
+                          {t.pnl!=null?`${up?"+":""}$${Math.abs(t.pnl).toFixed(2)}`:"—"}
+                        </td>
+                        <td style={{fontSize:9,color:"var(--text3)",fontFamily:"var(--font-mono)"}}>
+                          {t.closed?new Date(t.closed).toLocaleString(undefined,
+                            {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

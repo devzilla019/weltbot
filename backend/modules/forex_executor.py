@@ -248,33 +248,117 @@ def place_forex_order(signal_data: Dict, kronos_bias: Dict) -> Dict:
 
 # ── Close position ────────────────────────────────────────────────────────────
 
-def close_forex_position(deal_id: str, trade_id: int, pnl: float = 0.0) -> bool:
-    """Close a Capital.com position and update the ForexTrade row."""
+def close_forex_position(deal_id: str, trade_id: int, pnl: float = None) -> Dict:
+    """
+    Close a Capital.com position and update the ForexTrade row.
+
+    When `pnl` is not supplied the realised P&L is read from the broker
+    before closing, so manual closes are recorded with the real figure
+    rather than defaulting to zero.
+
+    Returns {success, pnl, symbol, error}.
+    """
     try:
         from modules.market_data_forex import close_position
 
         result = close_position(deal_id)
         if not result.get("success"):
             logger.error(f"[capital] close failed for {deal_id}: {result.get('error')}")
-            return False
+            return {"success": False, "error": result.get("error", "close failed")}
+
+        realised = result.get("pnl") if pnl is None else pnl
+        realised = float(realised or 0.0)
 
         db = SessionLocal()
         try:
             trade = db.query(ForexTrade).filter(ForexTrade.id == trade_id).first()
             if trade:
-                trade.outcome = "WIN" if pnl >= 0 else "LOSS"
-                trade.pnl = round(float(pnl), 4)
+                trade.outcome = "WIN" if realised >= 0 else "LOSS"
+                trade.pnl = round(realised, 4)
                 trade.closed_at = datetime.utcnow()
                 db.commit()
-                logger.info(f"[capital] trade closed — id={trade_id} pnl=${pnl:.2f}")
+                logger.info(f"[forex] CLOSED {trade.symbol} {trade.signal} — "
+                            f"P&L ${realised:+.2f} (trade id={trade_id})")
+                result["symbol"] = result.get("symbol") or trade.symbol
         except Exception as e:
             logger.error(f"[capital] db update error: {e}")
             db.rollback()
         finally:
             db.close()
 
-        return True
+        result["pnl"] = round(realised, 2)
+        return result
 
     except Exception as e:
         logger.error(f"[capital] close_forex_position error: {e}")
-        return False
+        return {"success": False, "error": str(e)}
+
+
+def close_all_forex_positions() -> Dict:
+    """
+    Close every open Capital.com position and settle the matching rows.
+
+    Returns {success, closed, failed, total_pnl, results}.
+    """
+    results = []
+    total_pnl = 0.0
+    failed = 0
+
+    db = SessionLocal()
+    try:
+        open_trades = db.query(ForexTrade).filter(ForexTrade.outcome == "OPEN").all()
+        pending = [
+            {"id": t.id, "symbol": t.symbol, "deal_id": t.metaapi_position_id}
+            for t in open_trades
+        ]
+    finally:
+        db.close()
+
+    if not pending:
+        return {"success": True, "closed": 0, "failed": 0,
+                "total_pnl": 0.0, "results": []}
+
+    for item in pending:
+        if not item["deal_id"]:
+            # Never reached the broker — just settle the row locally
+            _settle_local(item["id"], 0.0)
+            results.append({"symbol": item["symbol"], "success": True, "pnl": 0.0})
+            continue
+
+        res = close_forex_position(item["deal_id"], item["id"])
+        if res.get("success"):
+            pnl = float(res.get("pnl") or 0.0)
+            total_pnl += pnl
+            results.append({"symbol": item["symbol"], "success": True, "pnl": pnl})
+        else:
+            failed += 1
+            results.append({"symbol": item["symbol"], "success": False,
+                            "error": res.get("error")})
+
+    logger.info(f"[forex] CLOSE ALL — {len(pending) - failed} closed, "
+                f"{failed} failed, total P&L ${total_pnl:+.2f}")
+
+    return {
+        "success": failed == 0,
+        "closed": len(pending) - failed,
+        "failed": failed,
+        "total_pnl": round(total_pnl, 2),
+        "results": results,
+    }
+
+
+def _settle_local(trade_id: int, pnl: float) -> None:
+    """Mark a trade closed without a broker call (no deal id recorded)."""
+    db = SessionLocal()
+    try:
+        trade = db.query(ForexTrade).filter(ForexTrade.id == trade_id).first()
+        if trade:
+            trade.outcome = "WIN" if pnl >= 0 else "LOSS"
+            trade.pnl = round(float(pnl), 4)
+            trade.closed_at = datetime.utcnow()
+            db.commit()
+    except Exception as e:
+        logger.error(f"[capital] local settle error: {e}")
+        db.rollback()
+    finally:
+        db.close()

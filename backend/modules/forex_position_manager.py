@@ -175,19 +175,41 @@ def get_forex_position_summary() -> Dict:
         for trade in open_trades:
             p = pos_map.get(str(trade.metaapi_position_id or ""))
             if p:
+                entry = trade.entry_price or 0.0
+                current = p.get("current_price") or 0.0
+                pnl = round(p.get("unrealized_pnl", 0), 2)
+
+                # Percentage move in the trade's direction, and progress
+                # from entry towards the final target.
+                if entry:
+                    move = (current - entry) / entry * 100
+                    pnl_pct = move if trade.signal == "BUY" else -move
+                else:
+                    pnl_pct = 0.0
+
+                target = trade.tp2 or trade.take_profit or 0.0
+                progress = 0.0
+                if target and entry and target != entry:
+                    progress = (current - entry) / (target - entry) * 100
+                    progress = max(0.0, min(100.0, progress))
+
                 open_positions.append({
                     "id":          trade.id,
                     "symbol":      trade.symbol,
                     "signal":      trade.signal,
-                    "entry":       trade.entry_price,
-                    "current":     p.get("current_price"),
+                    "entry":       entry,
+                    "current":     current,
                     "sl":          trade.stop_loss,
                     "tp":          trade.take_profit,
                     "tp1":         trade.tp1,
                     "tp2":         trade.tp2,
                     "entry_type":  trade.entry_type,
                     "partial_tp_hit": bool(trade.partial_tp_hit),
-                    "pnl":         round(p.get("unrealized_pnl", 0), 2),
+                    "pnl":         pnl,
+                    "pnl_pct":     round(pnl_pct, 3),
+                    "progress":    round(progress, 1),
+                    "risk_reward": round(abs((target - entry) / (entry - trade.stop_loss)), 2)
+                                   if trade.stop_loss and entry and entry != trade.stop_loss else 0.0,
                     "size":        p.get("size"),
                     "lots":        trade.lots,
                     "confidence":  trade.confidence,

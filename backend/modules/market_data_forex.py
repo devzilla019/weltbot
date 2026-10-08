@@ -816,12 +816,40 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
 # ── Close position ────────────────────────────────────────────────────────────
 
 def close_position(deal_id: str) -> Dict:
-    """Close an open position by dealId. Returns {success, error}."""
+    """
+    Close an open position by dealId.
+
+    Reads the position first so the realised P&L can be returned to the
+    caller — the dashboard shows it immediately after a manual close.
+    Returns {success, pnl, symbol, size, error}.
+    """
+    pnl = 0.0
+    symbol = None
+    size = None
+
+    try:
+        positions = get_open_positions()
+        if positions:
+            for p in positions:
+                if str(p.get("id")) == str(deal_id):
+                    pnl = float(p.get("unrealized_pnl") or 0.0)
+                    symbol = p.get("symbol")
+                    size = p.get("size")
+                    break
+    except Exception as e:
+        logger.warning(f"[capital] could not read P&L before close: {e}")
+
     resp = _session.delete(f"/api/v1/positions/{deal_id}")
     if resp is None:
         return {"success": False, "error": _last_error or "close request failed"}
-    logger.info(f"[capital] position closed — dealId={deal_id}")
-    return {"success": True}
+
+    # The cached position list is now stale
+    with _cache_lock:
+        _positions_cache.clear()
+        _balance_cache.clear()
+
+    logger.info(f"[capital] position closed — dealId={deal_id} pnl=${pnl:.2f}")
+    return {"success": True, "pnl": round(pnl, 2), "symbol": symbol, "size": size}
 
 
 # ── Compatibility shims ───────────────────────────────────────────────────────

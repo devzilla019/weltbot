@@ -254,6 +254,93 @@ def forex_trades(limit: int = 50) -> List[Dict]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/trade/{trade_id}/close")
+def close_forex_trade(trade_id: int) -> Dict:
+    """
+    Manually close one forex position.
+
+    Closes it at Capital.com and records the realised P&L on the trade row.
+    """
+    try:
+        from database import SessionLocal
+        from models import ForexTrade
+        from modules.forex_executor import close_forex_position
+
+        db = SessionLocal()
+        try:
+            trade = db.query(ForexTrade).filter(
+                ForexTrade.id == trade_id,
+                ForexTrade.outcome == "OPEN",
+            ).first()
+
+            if not trade:
+                return {"success": False, "error": "Trade not found or already closed"}
+
+            symbol = trade.symbol
+            deal_id = trade.metaapi_position_id
+        finally:
+            db.close()
+
+        if not deal_id:
+            return {"success": False,
+                    "error": f"{symbol} has no broker deal id — cannot close"}
+
+        result = close_forex_position(deal_id, trade_id)
+        if result.get("success"):
+            logger.info(f"[forex-api] manual close {symbol} pnl=${result.get('pnl', 0):+.2f}")
+            return {
+                "success": True,
+                "message": f"Closed {symbol}",
+                "pnl": result.get("pnl", 0.0),
+                "symbol": symbol,
+            }
+        return {"success": False, "error": result.get("error", "Close failed")}
+
+    except Exception as e:
+        logger.error(f"[forex-api] close trade error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/close-all")
+def close_all_forex() -> Dict:
+    """Close every open forex position and return the combined P&L."""
+    try:
+        from modules.forex_executor import close_all_forex_positions
+
+        result = close_all_forex_positions()
+        logger.info(f"[forex-api] close-all — {result['closed']} closed, "
+                    f"{result['failed']} failed, P&L ${result['total_pnl']:+.2f}")
+        return result
+
+    except Exception as e:
+        logger.error(f"[forex-api] close-all error: {e}")
+        return {"success": False, "error": str(e), "closed": 0, "failed": 0,
+                "total_pnl": 0.0, "results": []}
+
+
+@router.delete("/trades/clear")
+def clear_forex_trades() -> Dict:
+    """Clear forex trade history (open positions are left untouched)."""
+    try:
+        from database import SessionLocal
+        from models import ForexTrade
+
+        db = SessionLocal()
+        try:
+            deleted = db.query(ForexTrade).filter(
+                ForexTrade.outcome != "OPEN"
+            ).delete(synchronize_session=False)
+            db.commit()
+            logger.info(f"[forex-api] cleared {deleted} closed forex trades")
+            return {"success": True, "deleted": deleted}
+        finally:
+            db.close()
+
+    except Exception as e:
+        logger.error(f"[forex-api] clear trades error: {e}")
+        return {"success": False, "error": str(e), "deleted": 0}
+
+
 @router.get("/cascade-stats")
 def cascade_stats() -> Dict:
     """
