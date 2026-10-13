@@ -90,8 +90,18 @@ def calculate_position_size(symbol: str, entry: float, sl: float,
             return 0.0
 
         risk_pct = forex_risk_pct(balance)
-        risk_amount = balance * risk_pct
 
+        # A user-set override wins over the balance-scaled default, so the
+        # setting is authoritative rather than advisory.
+        try:
+            from modules.risk_settings import get_settings
+            override = get_settings().get("forex_risk_pct")
+            if override:
+                risk_pct = float(override)
+        except Exception:
+            pass
+
+        risk_amount = balance * risk_pct
         pip = _pip_size(symbol)
         pvpl = _pip_value_per_lot(symbol)
         contract = _contract_size(symbol)

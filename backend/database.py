@@ -49,6 +49,11 @@ def run_light_migrations():
 
     wanted = {
         "crt_levels": [("timeframe", f"{varchar} DEFAULT '1d'")],
+        "risk_settings": [
+            # Diagnostic mode landed after the table itself, so an existing
+            # deployment needs the column added rather than a full migration.
+            ("diagnostic_mode", f"BOOLEAN DEFAULT {bool_default}"),
+        ],
         "forex_trades": [
             ("crt_timeframe", varchar),
             ("confirm_timeframe", varchar),

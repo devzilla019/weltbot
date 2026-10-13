@@ -51,6 +51,15 @@ def evaluate_trades(db: Session = Depends(get_db)):
                  (t.signal == "SELL" and price >= t.stop_loss)
         if hit_tp or hit_sl:
             from modules.executor import close_position
+            from main import execution_blocked, record_diagnostic
+
+            # Only the explicit diagnostic switch suppresses this automatic
+            # exit — a market kill-switch must not strand an open position.
+            reason = execution_blocked(t.asset, "crypto")
+            if reason and "diagnostic mode" in reason:
+                record_diagnostic("crypto", t.asset, "REJECT",
+                                  f"exit suppressed: {reason}")
+                continue
             close_position(t.asset, t.position_sz, t.id)
             evaluated += 1
     db.commit()
@@ -66,6 +75,14 @@ def manual_close_trade(trade_id: int, db: Session = Depends(get_db)):
         return {"success": False, "error": "Trade not found or already closed"}
     try:
         from modules.executor import close_position
+        from main import guard_order
+
+        # Diagnostic mode must not close positions either — a simulation that
+        # flattens real trades would be a side effect, not an evaluation.
+        blocked = guard_order(trade.asset, "crypto")
+        if blocked:
+            return blocked
+
         result = close_position(trade.asset, trade.position_sz, trade.id)
         return {"success": True, "message": f"Closed {trade.asset}", "pnl": result.get("pnl", 0)}
     except Exception as e:

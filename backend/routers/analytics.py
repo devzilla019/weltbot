@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
@@ -205,6 +205,183 @@ def get_api_key_status():
         "configured":  bool(key),
         "key_preview": f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "not set",
         "testnet":     _runtime_config.get("testnet", True),
+    }
+
+
+# ── RISK SETTINGS ─────────────────────────────────────────────────────────────
+
+@router.get("/settings/risk")
+def get_risk_settings():
+    """
+    Current risk settings plus the bounds each one is validated against.
+
+    Everything here is user-controllable, including switching the daily loss
+    limits off — a hard stop that cannot be relaxed makes a strategy
+    impossible to evaluate, because nothing fires again until the next day.
+
+    The returned `limits` are the same bounds enforced server-side on write,
+    so the UI and the API can never disagree about what is acceptable.
+    """
+    from modules.risk_settings import get_settings, _BOUNDS
+
+    rs = get_settings(force=True)
+
+    units = {
+        "daily_loss_limit": "fraction",
+        "risk_pct":         "fraction",
+        "min_confidence":   "percent",
+        "max_trades":       "count",
+    }
+    steps = {"daily_loss_limit": 0.005, "risk_pct": 0.001,
+             "min_confidence": 1.0, "max_trades": 1}
+
+    limits = {}
+    for key, (low, high) in _BOUNDS.items():
+        for tag, unit in units.items():
+            if key.endswith(tag):
+                limits[key] = {"min": low, "max": high,
+                               "step": steps[tag], "unit": unit}
+                break
+
+    return {
+        "settings": rs,
+        "limits": limits,
+        "defaults": {
+            "forex_daily_loss_limit": 0.06, "crypto_daily_loss_limit": 0.05,
+            "forex_risk_pct": 0.02, "crypto_risk_pct": 0.01,
+            "forex_min_confidence": 88.0, "crypto_min_confidence": 90.0,
+            "forex_max_trades": 3, "crypto_max_trades": 2,
+        },
+    }
+
+
+@router.post("/settings/risk")
+async def update_risk_settings(request: Request):
+    """
+    Apply partial risk-setting changes.
+
+    Unknown keys and out-of-range values are rejected and reported rather than
+    silently coerced, so a typo cannot quietly become a different limit than
+    the one the user asked for.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+
+    from modules.risk_settings import update_settings, validate_changes
+
+    _, rejected = validate_changes(body)
+    updated = update_settings(body)
+    return {
+        "success":   True,
+        "message":   "Settings applied" if not rejected else "Settings applied with rejections",
+        "settings":  updated,
+        "rejected":  [{"key": k, "reason": r} for k, r in rejected],
+    }
+
+
+@router.post("/settings/risk/reset")
+def reset_risk_settings():
+    """Restore every risk setting to its default."""
+    from modules.risk_settings import update_settings
+
+    defaults = {
+        "forex_enabled": True, "crypto_enabled": True,
+        "forex_daily_limit_enabled": True, "forex_daily_loss_limit": 0.06,
+        "crypto_daily_limit_enabled": True, "crypto_daily_loss_limit": 0.05,
+        "forex_risk_pct": 0.02, "crypto_risk_pct": 0.01,
+        "forex_min_confidence": 88.0, "crypto_min_confidence": 90.0,
+        "forex_max_trades": 3, "crypto_max_trades": 2,
+        "diagnostic_mode": False,
+        "auto_resume": True, "weekend_guard": True,
+    }
+    return {"success": True, "settings": update_settings(defaults)}
+
+
+# ── DIAGNOSTICS ───────────────────────────────────────────────────────────────
+
+@router.get("/diagnostics")
+def get_diagnostics(limit: int = 50):
+    """
+    Recent signal evaluations with the reason each one passed or was blocked.
+
+    These are SIMULATED evaluations: no entry here represents an executed
+    order. When diagnostic mode is on, every row is marked simulated and the
+    execution guard suppresses any order the scanner would otherwise place.
+    """
+    from main import get_diagnostics as _get, record_diagnostic
+    from modules.risk_settings import get_settings, diagnostic_mode
+
+    rs = get_settings(force=True)
+    return {
+        "diagnostic_mode": bool(rs.get("diagnostic_mode", False)),
+        "simulated":       diagnostic_mode(),
+        "note":            ("Diagnostic mode is ON — signals are evaluated but no "
+                            "orders are submitted, modified, or closed."
+                            if rs.get("diagnostic_mode")
+                            else "Diagnostic mode is OFF — normal trading is active; "
+                                 "entries below show the last observed decisions."),
+        "entries":         _get(limit),
+    }
+
+
+@router.post("/diagnostics/clear")
+def clear_diagnostics():
+    """Drop the in-memory diagnostic ring."""
+    from main import clear_diagnostics as _clear
+
+    return {"success": True, "cleared": _clear()}
+
+
+@router.post("/diagnostics/evaluate")
+def evaluate_symbol(payload: dict):
+    """
+    Run one symbol through the signal path WITHOUT executing anything.
+
+    This is a dry evaluation: it reports what the engine would decide and why,
+    and always refuses to place an order regardless of diagnostic mode.
+    """
+    symbol = (payload or {}).get("symbol")
+    market = (payload or {}).get("market", "crypto")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    from main import record_diagnostic
+
+    try:
+        if market == "forex":
+            from modules.forex_position_manager import can_open_forex_trade
+            allowed, reason = can_open_forex_trade(symbol)
+        else:
+            from modules.signal_engine import scan_btc_eth_crt, crt_min_confidence
+            setup = scan_btc_eth_crt(symbol)
+            floor = crt_min_confidence()
+            if setup and setup.get("direct_signal"):
+                conf = setup["direct_signal"].get("confidence")
+                if conf is not None and conf < floor:
+                    allowed, reason = False, f"confidence {conf:.1f}% < {floor:.0f}%"
+                else:
+                    allowed, reason = True, f"CRT entry live (floor {floor:.0f}%)"
+            elif setup:
+                allowed, reason = False, "CRT setup found, entry trigger not live"
+            else:
+                allowed, reason = False, "no CRT setup"
+    except Exception as e:
+        allowed, reason = False, f"evaluation error: {e}"
+
+    decision = "PASS" if allowed else "REJECT"
+    record_diagnostic(market, symbol, decision, reason)
+    return {
+        "symbol":    symbol,
+        "market":    market,
+        "decision":  decision,
+        "reason":    reason,
+        "simulated": True,
+        "order_placed": False,
     }
 
 

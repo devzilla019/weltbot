@@ -281,6 +281,14 @@ def close_forex_trade(trade_id: int) -> Dict:
         finally:
             db.close()
 
+        # Diagnostic mode suppresses order side effects, including closes, so a
+        # simulation cannot flatten a real position.
+        from main import guard_order
+        blocked = guard_order(symbol, "forex")
+        if blocked:
+            logger.info(f"[forex-api] close suppressed for {symbol}: {blocked['error']}")
+            return blocked
+
         if not deal_id:
             return {"success": False,
                     "error": f"{symbol} has no broker deal id — cannot close"}
@@ -306,6 +314,13 @@ def close_all_forex() -> Dict:
     """Close every open forex position and return the combined P&L."""
     try:
         from modules.forex_executor import close_all_forex_positions
+        from main import guard_order
+
+        blocked = guard_order("*", "forex")
+        if blocked:
+            logger.info(f"[forex-api] close-all suppressed: {blocked['error']}")
+            return {**blocked, "closed": 0, "failed": 0, "total_pnl": 0.0,
+                    "results": []}
 
         result = close_all_forex_positions()
         logger.info(f"[forex-api] close-all — {result['closed']} closed, "

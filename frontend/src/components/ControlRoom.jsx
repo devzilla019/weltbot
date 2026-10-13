@@ -1,11 +1,12 @@
 import{useState,useMemo}from"react";
 import{useApp}from"../context/AppContext";
-import{forexApi}from"../api";
+import{forexApi,botApi}from"../api";
 import{useLiveData}from"../hooks/useLiveData";
 import{makeApi}from"../api";
 import PositionRow from"./PositionRow";
 import RiskGauge from"./RiskGauge";
 import SessionClock from"./SessionClock";
+import SettingsPanel from"./SettingsPanel";
 import{fmtMoney,clockTime,relTime}from"../utils/format";
 
 /**
@@ -22,6 +23,7 @@ export default function ControlRoom(){
 
   const[busy,setBusy]=useState(false);
   const[confirmAll,setConfirmAll]=useState(false);
+  const[showSettings,setShowSettings]=useState(false);
 
   const positions=live.forexPositions?.open_positions||[];
   const stale=live.forexPositions?.stale;
@@ -34,6 +36,7 @@ export default function ControlRoom(){
   const winRate=withPnl.length?Math.round(wins/withPnl.length*100):0;
 
   const isLive=live.botStatus?.running&&!live.botStatus?.paused;
+  const paused=!!live.botStatus?.paused;
 
   const act=async(fn,label)=>{
     setBusy(true);
@@ -65,6 +68,11 @@ export default function ControlRoom(){
     else{await api.startBot();showToast("Bot started","success");}
   },"Toggle");
 
+  const resume=()=>act(async()=>{
+    const r=await botApi.resume();
+    showToast(r.cleared_pause?`Resumed — cleared: ${r.cleared_pause}`:"Bot resumed","success");
+  },"Resume");
+
   return(
     <div className="control-room">
       {/* ── Status strip ─────────────────────────────────────────────── */}
@@ -84,7 +92,14 @@ export default function ControlRoom(){
                   disabled={busy} onClick={toggleBot}>
             {isLive?"■ Stop":"▶ Start"}
           </button>
+          {paused&&(
+            <button className="btn btn-warn btn-sm" disabled={busy} onClick={resume}
+                    title="Clear the pause without restarting">
+              ⟲ Resume
+            </button>)}
           <button className="btn btn-scan btn-sm" disabled={busy} onClick={scan}>⟳ Scan</button>
+          <button className="btn btn-ghost btn-sm" onClick={()=>setShowSettings(true)}
+                  title="Risk settings">⚙ Settings</button>
           {positions.length>0&&(confirmAll
             ?<>
               <button className="btn btn-danger btn-sm" disabled={busy} onClick={closeAll}>
@@ -98,6 +113,13 @@ export default function ControlRoom(){
              </button>)}
         </div>
       </div>
+
+      {paused&&(
+        <div className="cr-banner warn">
+          ⏸ Bot paused{live.botStatus?.pause_reason?` — ${live.botStatus.pause_reason}`:""}
+          <button onClick={resume}>Resume now</button>
+        </div>)}
+      {showSettings&&<SettingsPanel onClose={()=>setShowSettings(false)} onSaved={live.refresh}/>}
 
       {live.backendDown&&(
         <div className="cr-banner danger">

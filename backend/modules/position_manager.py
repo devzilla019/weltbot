@@ -188,23 +188,54 @@ def cooldown_log_once(symbol, db) -> bool:
     except Exception:
         return True
 
-def daily_drawdown_check():
+def crypto_day_start() -> datetime:
+    """
+    Start of the current crypto trading day (00:00 UTC).
+
+    Binance runs 24/7 on UTC, so the daily loss budget must roll at midnight
+    UTC rather than local time — otherwise the window would shift by the
+    server's offset and reset the budget in the middle of a session.
+    """
+    now = datetime.utcnow()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def crypto_daily_loss_pct() -> float:
+    """Today's realised crypto loss as a fraction of the live balance."""
     db = SessionLocal()
     try:
         from modules.market_data import get_balance
         bal = get_balance()
-        start = datetime.combine(datetime.utcnow().date(), datetime.min.time())
-        losses = db.query(Trade).filter(Trade.outcome=="LOSS", Trade.closed_at>=start).all()
+        losses = db.query(Trade).filter(
+            Trade.outcome == "LOSS",
+            Trade.closed_at >= crypto_day_start(),
+        ).all()
         total = sum(abs(t.pnl or 0) for t in losses)
-        if bal > 0 and total/bal >= DAILY_LOSS_LIMIT:
-            print(f"[positions] daily drawdown: ${total:.2f}")
-            return True
-        return False
+        if bal <= 0:
+            return 0.0
+        return total / bal
     except Exception as e:
-        print(f"[positions] drawdown: {e}")
-        return False
+        print(f"[positions] crypto drawdown: {e}")
+        return 0.0
     finally:
         db.close()
+
+
+def daily_drawdown_check(limit: float | None = None) -> bool:
+    """
+    True when today's realised crypto loss has reached `limit`.
+
+    Only the crypto Trade table is consulted, so a crypto drawdown can never
+    influence forex. `limit` defaults to DAILY_DRAWDOWN_LIMIT for callers that
+    have no settings source; the entry check passes the dashboard value so the
+    configured crypto limit is what actually applies.
+    """
+    effective = DAILY_LOSS_LIMIT if limit is None else float(limit)
+    pct = crypto_daily_loss_pct()
+    if pct >= effective:
+        print(f"[positions] daily drawdown: {pct*100:.2f}% >= {effective*100:.2f}%")
+        return True
+    return False
 
 def check_and_exit_positions():
     """Main monitor — runs every 2 min. Syncs then checks SL/TP."""

@@ -333,13 +333,36 @@ def calculate_sl_tp(entry: float, ob: dict, direction: str, atr: float, confiden
 # ── MAIN L1 SCAN ──────────────────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  REFINED CRT WITH PULLBACK ENTRY — BTC/ETH only
-#  The other crypto pairs keep the existing SMC engine.
+#  REFINED CRT WITH PULLBACK ENTRY — every crypto pair
+#
+#  The refined CRT pullback engine was certified on BTC/ETH and is now routed
+#  for the whole crypto universe, so the per-symbol skip set that used to
+#  exist here has been removed. The SMC/EMA paths remain as fallbacks when CRT
+#  finds nothing, which preserves behaviour for pairs CRT does not sweep.
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Retained only as the set of pairs the engine was originally certified on.
+# It is NOT a routing allow-list — every crypto pair runs CRT.
 CRT_PULLBACK_SYMBOLS = {"BTC/USDT", "ETH/USDT"}
 
+# Confidence floor for the refined CRT entry path. Read from the dashboard's
+# crypto confidence setting so the slider is authoritative, falling back to the
+# certified value when the setting is unavailable.
 _CRT_MIN_CONF = 88
+
+
+def crt_min_confidence() -> float:
+    """
+    Confidence floor applied to refined CRT crypto entries.
+
+    Falls back to the certified constant when settings cannot be read, so a
+    settings outage never silently lowers the bar.
+    """
+    try:
+        from modules.risk_settings import get_settings
+        return float(get_settings().get("crypto_min_confidence", _CRT_MIN_CONF))
+    except Exception:
+        return float(_CRT_MIN_CONF)
 
 
 def _crt_candles(symbol: str, interval: str, limit: int):
@@ -420,10 +443,11 @@ def _crt_signal_to_crypto(sig: dict, price: float, atr: float) -> dict:
 
 def scan_btc_eth_crt(symbol: str) -> dict | None:
     """
-    Refined CRT with Pullback Entry for BTC/USDT and ETH/USDT.
+    Refined CRT with Pullback Entry.
 
-    H4 trend direction -> H1 pullback CRT range -> sweep -> 15m/5m entry
-    (QM > FVG > OB). Uses the existing Binance market_data candles.
+    Originally BTC/ETH only; now applied to every crypto pair in the
+    universe. H4 trend direction -> H1 pullback CRT range -> sweep ->
+    15m/5m entry (QM > FVG > OB), using the existing Binance candles.
 
     Returns a setup dict in the same shape as the forex CRT setup, with
     'direct_signal' attached when an entry trigger is already live.
@@ -507,7 +531,7 @@ def scan_btc_eth_crt(symbol: str) -> dict | None:
         setup["_df_h1"] = h1r
 
         signal = check_entry_condition_refined(setup, price, df15, df5, trend)
-        if signal and signal["confidence"] >= _CRT_MIN_CONF:
+        if signal and signal["confidence"] >= crt_min_confidence():
             print(f"[crypto-crt] {symbol} ENTRY {signal['signal']} @ "
                   f"{signal['entry_price']:.2f} | {signal['entry_type']} | "
                   f"conf={signal['confidence']}%")
@@ -550,7 +574,7 @@ def refresh_btc_eth_crt_entry(setup: dict) -> dict | None:
         setup["entry_timeframe"] = "5m" if entry_df is df5 else "15m"
 
         signal = check_entry_condition_refined(setup, price, df15, df5, trend)
-        if signal and signal["confidence"] >= _CRT_MIN_CONF:
+        if signal and signal["confidence"] >= crt_min_confidence():
             print(f"[crypto-crt] {symbol} ENTRY {signal['signal']} @ "
                   f"{signal['entry_price']:.2f} | {signal['entry_type']} | "
                   f"conf={signal['confidence']}%")

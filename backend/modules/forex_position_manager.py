@@ -328,19 +328,58 @@ def get_forex_position_summary() -> Dict:
 
 # ── Trade guards ──────────────────────────────────────────────────────────────
 
-def forex_daily_loss_check() -> Tuple[bool, str]:
-    """
-    True when today's realised forex loss has hit FOREX_DAILY_LOSS_LIMIT.
+# Fallback for the max-trades setting when the stored value is unusable.
+# Kept in step with config.FOREX_MAX_TRADES / RiskSettings.forex_max_trades.
+_DEFAULT_FOREX_MAX_TRADES = 3
 
-    Protects the account from a losing streak. Without this the forex side
-    would keep opening trades no matter how much the day had already lost.
+
+def _validated_max_trades(value) -> int:
+    """
+    Coerce the stored max-trades setting into a usable positive integer.
+
+    The setting is user-editable through the dashboard, so it can arrive as a
+    string, a float, or a nonsense value. A non-positive cap would silently
+    block every forex entry, so anything unusable falls back to the default
+    rather than being trusted.
     """
     try:
-        from config import FOREX_DAILY_LOSS_LIMIT
+        count = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_FOREX_MAX_TRADES
+    return count if count >= 1 else _DEFAULT_FOREX_MAX_TRADES
+
+
+def forex_day_start() -> datetime:
+    """
+    Start of the current forex trading day.
+
+    Forex rolls over at 00:00 UTC — the same boundary Capital.com uses for
+    daily financing and the one the daily P&L already rolls on. Using local
+    time here would shift the window and reset the loss budget mid-session.
+    """
+    now = datetime.utcnow()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def forex_daily_loss_check() -> Tuple[bool, str]:
+    """
+    True when today's realised forex loss has hit the configured limit.
+
+    Returns True (allowed) immediately when the limit is switched off, so the
+    strategy can be evaluated without waiting a full day for the next window.
+    """
+    try:
+        from modules.risk_settings import get_settings
+
+        rs = get_settings()
+        if not rs.get("forex_daily_limit_enabled", True):
+            return True, "OK"
+
+        limit = float(rs.get("forex_daily_loss_limit", 0.06))
 
         db = SessionLocal()
         try:
-            since = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            since = forex_day_start()
             closed = db.query(ForexTrade).filter(
                 ForexTrade.outcome.in_(["WIN", "LOSS"]),
                 ForexTrade.closed_at >= since,
@@ -356,7 +395,7 @@ def forex_daily_loss_check() -> Tuple[bool, str]:
             if balance <= 0:
                 return True, "OK"
 
-            if pnl < 0 and abs(pnl) >= balance * FOREX_DAILY_LOSS_LIMIT:
+            if pnl < 0 and abs(pnl) >= balance * limit:
                 return False, (f"daily forex loss limit hit "
                                f"(${pnl:.2f} of ${balance:.2f} balance)")
             return True, "OK"
@@ -379,18 +418,22 @@ def can_open_forex_trade(symbol: str) -> Tuple[bool, str]:
     prematurely), which is how a pair ended up holding two live trades.
     """
     try:
-        from config import FOREX_MAX_TRADES
+        from modules.risk_settings import get_settings
         from modules.market_data_forex import get_open_positions
+
+        rs = get_settings()
 
         allowed, reason = forex_daily_loss_check()
         if not allowed:
             return False, reason
 
+        max_trades = _validated_max_trades(rs.get("forex_max_trades"))
+
         db = SessionLocal()
         try:
             open_count = db.query(ForexTrade).filter(ForexTrade.outcome == "OPEN").count()
-            if open_count >= FOREX_MAX_TRADES:
-                return False, f"Max forex trades reached ({open_count}/{FOREX_MAX_TRADES})"
+            if open_count >= max_trades:
+                return False, f"Max forex trades reached ({open_count}/{max_trades})"
 
             existing = db.query(ForexTrade).filter(
                 ForexTrade.symbol == symbol,

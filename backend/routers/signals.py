@@ -72,6 +72,12 @@ def execute_signal(symbol: str, db: Session = Depends(get_db)):
     risk = payload["risk_plan"]
     if sig["signal"] == "HOLD":
         return {"message": "HOLD — no trade"}
+
+    from main import guard_order
+    blocked = guard_order(symbol, "crypto")
+    if blocked:
+        return blocked
+
     from modules.executor import place_order
     result = place_order(
         symbol         = symbol,

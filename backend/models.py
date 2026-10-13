@@ -46,6 +46,47 @@ class BotState(Base):
     pause_reason= Column(String, nullable=True)
     updated_at  = Column(DateTime(timezone=True), server_default=func.now())
 
+class RiskSettings(Base):
+    """
+    Runtime-tunable risk controls, editable from the dashboard and persisted
+    so they survive a redeploy.
+
+    Every limit can be switched off, because a hard daily stop that cannot be
+    relaxed makes the strategy impossible to evaluate: once it trips, no
+    further trades fire until the next day, so there is nothing to learn from.
+    """
+    __tablename__ = "risk_settings"
+    id                          = Column(Integer, primary_key=True)
+
+    # Master switches
+    forex_enabled               = Column(Boolean, default=True)
+    crypto_enabled              = Column(Boolean, default=True)
+
+    # Daily loss limits (fractions, e.g. 0.06 = 6%)
+    forex_daily_limit_enabled   = Column(Boolean, default=True)
+    forex_daily_loss_limit      = Column(Float, default=0.06)
+    crypto_daily_limit_enabled  = Column(Boolean, default=True)
+    crypto_daily_loss_limit     = Column(Float, default=0.05)
+
+    # Risk per trade (fractions)
+    forex_risk_pct              = Column(Float, default=0.02)
+    crypto_risk_pct             = Column(Float, default=0.01)
+
+    # Minimum confidence to trade
+    forex_min_confidence        = Column(Float, default=88.0)
+    crypto_min_confidence       = Column(Float, default=90.0)
+
+    # Position caps
+    forex_max_trades            = Column(Integer, default=3)
+    crypto_max_trades           = Column(Integer, default=2)
+
+    # Behaviour
+    diagnostic_mode             = Column(Boolean, default=False)
+    auto_resume                 = Column(Boolean, default=True)
+    weekend_guard               = Column(Boolean, default=True)
+
+    updated_at                  = Column(DateTime(timezone=True), server_default=func.now())
+
 class ActiveSetup(Base):
     __tablename__ = "active_setups"
     id          = Column(Integer, primary_key=True)

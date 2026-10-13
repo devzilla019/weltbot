@@ -49,3 +49,15 @@ export const forexApi = {
   closeAll:       ()     => req("POST", "/api/forex/close-all"),
   clearTrades:    ()     => req("DELETE","/api/forex/trades/clear"),
 };
+
+// Risk settings — user-tunable limits, persisted server-side
+export const settingsApi = {
+  getRisk:    ()   => req("GET",  "/api/analytics/settings/risk"),
+  saveRisk:   (d)  => req("POST", "/api/analytics/settings/risk", d),
+  resetRisk:  ()   => req("POST", "/api/analytics/settings/risk/reset"),
+};
+
+// Bot lifecycle
+export const botApi = {
+  resume: () => req("POST", "/api/bot/resume"),
+};
