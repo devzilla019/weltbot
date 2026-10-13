@@ -10,7 +10,7 @@ from models import SignalCache, BotState, Trade
 from routers import signals, trades, analytics, forex, crypto_strategy
 # AUTH DISABLED — re-enable later by importing + including auth.router below
 # from routers import auth
-from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET
+from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET, DAILY_DRAWDOWN_LIMIT
 from datetime import datetime
 import json, logging, os, sys, threading
 
@@ -52,6 +52,85 @@ _last_scan_log  = []
 _active_setups: dict = {}
 _forex_active_setups: dict = {}
 
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+# Bounded ring of the most recent signal evaluations. Populated by the entry
+# checks and by execution guards, so the dashboard can show WHY a signal was
+# not traded (in either normal or diagnostic mode).
+_diag_log: list = []
+_diag_lock = threading.Lock()
+_DIAG_MAX = 200
+
+
+def record_diagnostic(market: str, symbol: str, decision: str, reason: str,
+                      confidence=None, strategy: str | None = None) -> None:
+    """
+    Append one signal evaluation to the diagnostic ring.
+
+    `decision` is PASS (signal accepted), REJECT (signal produced but blocked),
+    or SKIP (no signal / nothing to do). Kept in memory only — this is an
+    observability aid, not trading state, so it is intentionally not persisted.
+    """
+    try:
+        from modules.risk_settings import diagnostic_mode
+        entry = {
+            "time":       datetime.utcnow().isoformat(),
+            "market":     market,
+            "symbol":     symbol,
+            "decision":   decision,
+            "reason":     reason,
+            "confidence": round(float(confidence), 1) if confidence is not None else None,
+            "strategy":   strategy,
+            "simulated":  bool(diagnostic_mode()),
+        }
+        with _diag_lock:
+            _diag_log.append(entry)
+            del _diag_log[:-_DIAG_MAX]
+    except Exception as e:
+        print(f"[diag] record error: {e}")
+
+
+def get_diagnostics(limit: int = 50) -> list:
+    with _diag_lock:
+        return list(reversed(_diag_log[-max(1, min(int(limit), _DIAG_MAX)):]))
+
+
+def clear_diagnostics() -> int:
+    with _diag_lock:
+        n = len(_diag_log)
+        _diag_log.clear()
+    return n
+
+
+def execution_blocked(symbol: str, market: str) -> str | None:
+    """
+    Central pre-execution guard. Returns a reason when an order must NOT be
+    sent, or None when normal trading may proceed.
+
+    Every order-submitting route calls this, so diagnostic mode cannot be
+    bypassed by hitting a manual endpoint (the scan loops and the manual
+    execute/close routes all funnel through here).
+    """
+    from modules.risk_settings import get_settings, diagnostic_mode
+
+    if diagnostic_mode():
+        return "diagnostic mode — evaluation only, order suppressed"
+    if not get_settings().get(f"{market}_enabled", True):
+        return f"{market} trading disabled in settings"
+    return None
+
+
+def guard_order(symbol: str, market: str) -> dict | None:
+    """
+    Convenience wrapper: returns an error payload when execution is blocked,
+    and records the attempt in the diagnostic ring.
+    """
+    reason = execution_blocked(symbol, market)
+    if reason:
+        record_diagnostic(market, symbol, "REJECT", reason)
+        return {"success": False, "error": reason, "simulated": True,
+                "diagnostic": True}
+    return None
+
 # Re-entrancy guards — prevent overlapping runs of the 60s entry checks
 _job_locks = {
     "crypto_entry": threading.Lock(),
@@ -88,11 +167,20 @@ def _place_trade(sig: dict, balance: float, db) -> bool:
 
     symbol = sig["symbol"]
     signal = sig["signal"]
+    strategy = sig.get("strategy")
+
+    # Diagnostic mode / market kill-switch — never reach the exchange.
+    blocked = guard_order(symbol, "crypto")
+    if blocked:
+        print(f"[bot] {symbol} order suppressed: {blocked['error']}")
+        return False
 
     allowed, reason = can_reenter(symbol, db)
     if not allowed:
         if cooldown_log_once(symbol, db):
             print(f"[bot] {symbol} blocked: {reason}")
+        record_diagnostic("crypto", symbol, "REJECT", reason,
+                          sig.get("confidence"), strategy)
         return False
 
     atr  = sig["market"].get("atr", 0)
@@ -118,9 +206,15 @@ def _place_trade(sig: dict, balance: float, db) -> bool:
                            "entry":result["fill_price"],"sl":sl,"tp":tp,
                            "time":datetime.utcnow().isoformat()}]
         _active_setups.pop(symbol, None)
+        record_diagnostic("crypto", symbol, "PASS",
+                          f"order placed @ {result['fill_price']}",
+                          sig.get("confidence"), strategy)
         print(f"[bot] TRADE PLACED — {signal} {symbol} @ {result['fill_price']}")
         return True
     else:
+        record_diagnostic("crypto", symbol, "REJECT",
+                          f"order failed: {result.get('error')}",
+                          sig.get("confidence"), strategy)
         print(f"[bot] order failed {symbol}: {result.get('error')}")
         return False
 
@@ -137,13 +231,17 @@ def level1_bos_scan():
         if not state.is_running or state.paused:
             return
         from modules.universe      import get_universe
-        from modules.signal_engine import scan_for_bos, ema_momentum_scan, scan_btc_eth_crt, CRT_PULLBACK_SYMBOLS
+        from modules.signal_engine import scan_for_bos, ema_momentum_scan, scan_btc_eth_crt
+        from modules.risk_settings import get_settings
+
+        rs = get_settings()
 
         balance    = safe_get_balance()
         open_count = db.query(Trade).filter(Trade.outcome == "OPEN").count()
-        print(f"[L1] scanning — balance=${balance:.2f} open={open_count}/{MAX_OPEN_TRADES}")
+        max_trades = int(rs.get("crypto_max_trades", MAX_OPEN_TRADES))
+        print(f"[L1] scanning — balance=${balance:.2f} open={open_count}/{max_trades}")
 
-        if open_count >= MAX_OPEN_TRADES:
+        if open_count >= max_trades:
             return
 
         # Age existing setups
@@ -159,12 +257,12 @@ def level1_bos_scan():
             if symbol in new_setups:
                 continue
             try:
-                # BTC/ETH: refined CRT pullback strategy first
-                if symbol in CRT_PULLBACK_SYMBOLS:
-                    crt_setup = scan_btc_eth_crt(symbol)
-                    if crt_setup:
-                        new_setups[symbol] = crt_setup
-                        continue
+                # Every crypto pair uses the refined CRT pullback engine.
+                # The SMC path remains as a fallback when CRT finds nothing.
+                crt_setup = scan_btc_eth_crt(symbol)
+                if crt_setup:
+                    new_setups[symbol] = crt_setup
+                    continue
 
                 setup = scan_for_bos(symbol)
                 if setup:
@@ -209,10 +307,20 @@ def level2_entry_check():
 
         from modules.signal_engine     import check_entry_for_setup, refresh_btc_eth_crt_entry
         from modules.position_manager  import daily_drawdown_check
+        from modules.risk_settings     import get_settings
 
-        if daily_drawdown_check():
-            state.paused = 1; state.pause_reason = "Daily drawdown limit hit"
-            db.commit(); return
+        rs = get_settings()
+
+        # Crypto drawdown must only stop CRYPTO. Pausing the shared bot state
+        # here also halted forex, so four crypto losses took the forex engine
+        # offline for the rest of the day even though it was unaffected.
+        # The dashboard's crypto limit is the value that actually applies —
+        # daily_drawdown_check() only ever reads the crypto Trade table.
+        crypto_limit = float(rs.get("crypto_daily_loss_limit", DAILY_LOSS_LIMIT))
+        if rs.get("crypto_daily_limit_enabled", True) and daily_drawdown_check(crypto_limit):
+            print(f"[L2] crypto daily drawdown limit hit ({crypto_limit*100:.1f}%) "
+                  f"— skipping crypto entries (forex unaffected)")
+            return
 
         slots  = MAX_OPEN_TRADES - open_count
         placed = 0
@@ -383,6 +491,129 @@ def run_crt_scan():
         lock.release()
 
 
+def run_silver_bullet_cycle():
+    """Run the ICT Silver Bullet setup scan only within the configured UTC windows."""
+    from config import FOREX_ENABLED, FOREX_PAIRS
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.silver_bullet import (
+            calculate_daily_bias_all_pairs,
+            current_session,
+            expire_setups,
+            get_daily_bias,
+            run_silver_bullet_scan,
+            reset_daily_cache,
+        )
+
+        now = datetime.utcnow()
+        if now.hour == 0 and now.minute <= 2:
+            reset_daily_cache()
+
+        session = current_session(now)
+        if session is None:
+            expire_setups()
+            return
+
+        # Bias is required for the Silver Bullet filter; compute it once per day
+        # before the first liquid session starts and keep a safe fallback for any
+        # restart or stale cache.
+        if not any(get_daily_bias(symbol) for symbol in FOREX_PAIRS):
+            calculate_daily_bias_all_pairs()
+
+        run_silver_bullet_scan(session)
+        expire_setups(session)
+    except Exception as e:
+        print(f"[silver] cycle error: {e}")
+
+
+def run_silver_bullet_entry_check():
+    """Enter on active Silver Bullet FVG setups once price returns to the gap."""
+    from config import FOREX_ENABLED, FOREX_MIN_CONF
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.risk_settings import get_settings
+        from modules.market_data_forex import get_candles, get_current_price, get_session
+        from modules.silver_bullet import (
+            check_entry_in_fvg,
+            clear_active_setup,
+            current_session,
+            get_active_setups,
+        )
+        from modules.kronos_engine import get_cached_bias
+        from modules.forex_executor import place_forex_order
+        from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
+
+        if current_session() is None:
+            for symbol in list(get_active_setups()):
+                clear_active_setup(symbol)
+            return
+
+        pause = get_session().rate_limit_remaining()
+        if pause > 0:
+            print(f"[silver-entry] rate-limit pause active ({pause:.0f}s) — deferring")
+            return
+
+        min_conf = float(get_settings().get("forex_min_confidence", FOREX_MIN_CONF))
+        for symbol, setup in list(get_active_setups().items()):
+            try:
+                if setup.get("session") != current_session():
+                    continue
+
+                allowed, reason = can_open_forex_trade(symbol)
+                if not allowed:
+                    if forex_block_log_once(symbol, reason):
+                        print(f"[silver-entry] {symbol} blocked: {reason}")
+                    record_diagnostic("forex", symbol, "REJECT", reason)
+                    continue
+
+                price = get_current_price(symbol)
+                if not price:
+                    continue
+
+                df_5m = get_candles(symbol, timeframe="5m", limit=100)
+                signal = check_entry_in_fvg(setup, price, df_5m)
+                if not signal:
+                    continue
+
+                bias = get_cached_bias(symbol)
+                if bias:
+                    signal["confidence"] += bias.get("confidence_boost", 0)
+                    signal["confidence"] = min(signal["confidence"], 99)
+
+                if signal["confidence"] < min_conf:
+                    print(f"[silver-entry] {symbol} confidence too low: {signal['confidence']:.0f}%")
+                    continue
+
+                blocked = guard_order(symbol, "forex")
+                if blocked:
+                    print(f"[silver-entry] {symbol} order suppressed: {blocked['error']}")
+                    continue
+
+                result = place_forex_order(signal, bias or {})
+                if result["success"]:
+                    record_diagnostic("forex", symbol, "PASS",
+                                      f"order placed @ {signal['entry_price']:.5f}",
+                                      signal["confidence"],
+                                      signal.get("entry_type"))
+                    print(f"[forex] ENTRY {signal['signal']} {symbol} @ {signal['entry_price']:.5f} | "
+                          f"{signal['entry_type']} | conf={signal['confidence']:.0f}% | "
+                          f"SL={signal['stop_loss']:.5f} | TP1={signal['tp1']:.5f} | TP2={signal['tp2']:.5f}")
+                    clear_active_setup(symbol)
+                else:
+                    record_diagnostic("forex", symbol, "REJECT",
+                                      f"order failed: {result.get('error')}",
+                                      signal["confidence"])
+                    print(f"[silver-entry] {symbol} order failed: {result.get('error')}")
+            except Exception as e:
+                print(f"[silver-entry] error {symbol}: {e}")
+    except Exception as e:
+        print(f"[silver-entry] cycle error: {e}")
+
+
 def run_forex_entry_check():
     """Check for SMC entry on active CRT setups"""
     global _forex_active_setups
@@ -399,12 +630,21 @@ def run_forex_entry_check():
         state = _get_bot_state(db)
         if not state.is_running or state.paused:
             return
-        
+
         from modules.market_data_forex import get_candles, get_current_price, get_session
         from modules.forex_signal_engine import check_entry_condition_refined
         from modules.forex_executor import place_forex_order
         from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
         from modules.kronos_engine import get_cached_bias
+        from modules.risk_settings import get_settings
+
+        # Weekend guard — forex liquidity collapses between the Friday close
+        # and the Sunday reopen, so new entries are held back. Open positions
+        # are still monitored and can still close.
+        rs = get_settings()
+        if rs.get("weekend_guard", True) and datetime.utcnow().weekday() >= 5:
+            print("[forex-entry] weekend guard active — no new forex entries")
+            return
 
         # Respect an active Capital.com rate-limit pause
         pause = get_session().rate_limit_remaining()
@@ -431,6 +671,7 @@ def run_forex_entry_check():
                 if not allowed:
                     if forex_block_log_once(symbol, reason):
                         print(f"[forex-entry] {symbol} blocked: {reason}")
+                    record_diagnostic("forex", symbol, "REJECT", reason)
                     continue
                 price = get_current_price(symbol)
                 if not price:
@@ -455,18 +696,42 @@ def run_forex_entry_check():
                         signal['confidence'] = min(signal['confidence'], 99)
 
                     from config import FOREX_MIN_CONF
-                    if signal['confidence'] >= FOREX_MIN_CONF:
+                    try:
+                        from modules.risk_settings import get_settings
+                        min_conf = float(get_settings().get("forex_min_confidence", FOREX_MIN_CONF))
+                    except Exception:
+                        min_conf = FOREX_MIN_CONF
+
+                    if signal['confidence'] >= min_conf:
+                        blocked = guard_order(symbol, "forex")
+                        if blocked:
+                            print(f"[forex-entry] {symbol} order suppressed: "
+                                  f"{blocked['error']}")
+                            continue
                         result = place_forex_order(signal, bias or {})
                         if result['success']:
+                            record_diagnostic("forex", symbol, "PASS",
+                                              f"order placed @ "
+                                              f"{signal['entry_price']:.5f}",
+                                              signal['confidence'],
+                                              signal.get('entry_type'))
                             print(f"[forex] ENTRY {signal['signal']} {symbol} @ "
                                   f"{signal['entry_price']:.5f} | {signal['entry_type']} | "
                                   f"conf={signal['confidence']:.0f}% | "
                                   f"SL={signal['stop_loss']:.5f} | "
                                   f"TP1={signal['tp1']:.5f} | TP2={signal['tp2']:.5f}")
                             _forex_active_setups.pop(symbol, None)
+                        else:
+                            record_diagnostic("forex", symbol, "REJECT",
+                                              f"order failed: {result.get('error')}",
+                                              signal['confidence'])
                     else:
                         print(f"[forex-entry] {symbol} confidence too low: "
                               f"{signal['confidence']:.1f}%")
+                        record_diagnostic("forex", symbol, "REJECT",
+                                          f"confidence {signal['confidence']:.1f}% "
+                                          f"< {min_conf:.0f}%",
+                                          signal['confidence'])
                         _forex_active_setups.pop(symbol, None)
 
             except Exception as e:
@@ -539,12 +804,13 @@ def run_crypto_crt_scan():
             return
         from modules.universe import get_universe
         from modules.crypto_strategy import update_crypto_levels, scan_crypto_crt, get_crypto_setups
-        from modules.signal_engine import CRT_PULLBACK_SYMBOLS
         symbols = get_universe()
         for sym in symbols:
-            # BTC/ETH use the refined CRT pullback engine (level1_bos_scan)
-            if sym in CRT_PULLBACK_SYMBOLS:
-                continue
+            # Every crypto pair — including BTC/ETH — is scanned here for the
+            # SMC/CRT cascade. The refined CRT pullback path runs first in
+            # level1_bos_scan and simply finds nothing for pairs it does not
+            # sweep, so skipping any symbol here would silently drop the
+            # fallback instead of avoiding duplicate work.
             try:
                 update_crypto_levels(sym)
                 scan_crypto_crt(sym)
@@ -576,7 +842,11 @@ def run_crypto_entry_check():
         from modules.executor import place_order
         from modules.market_data import get_balance, get_ticker_price
         from config import MAX_OPEN_TRADES, MIN_CONFIDENCE
+        from modules.risk_settings import get_settings
         from models import Trade
+
+        rs = get_settings()
+        crypto_min_conf = float(rs.get("crypto_min_confidence", MIN_CONFIDENCE))
 
         setups = get_crypto_setups()
         if not setups:
@@ -604,15 +874,24 @@ def run_crypto_entry_check():
                 if not allowed:
                     if cooldown_log_once(symbol, db):
                         print(f"[crypto-entry] {symbol} blocked: {reason}")
+                    record_diagnostic("crypto", symbol, "REJECT", reason)
                     continue
 
                 sig = check_crypto_entry(symbol)
                 if not sig:
                     continue
 
-                if sig["confidence"] < MIN_CONFIDENCE:
-                    print(f"[crypto-entry] {symbol} confidence {sig['confidence']:.1f}% < {MIN_CONFIDENCE}")
+                if sig["confidence"] < crypto_min_conf:
+                    print(f"[crypto-entry] {symbol} confidence {sig['confidence']:.1f}% < {crypto_min_conf:.0f}")
+                    record_diagnostic("crypto", symbol, "REJECT",
+                                      f"confidence {sig['confidence']:.1f}% < {crypto_min_conf:.0f}%",
+                                      sig["confidence"])
                     clear_crypto_setup(symbol)
+                    continue
+
+                blocked = guard_order(symbol, "crypto")
+                if blocked:
+                    print(f"[crypto-entry] {symbol} order suppressed: {blocked['error']}")
                     continue
 
                 price = get_ticker_price(symbol)
@@ -631,8 +910,14 @@ def run_crypto_entry_check():
                 if result.get("success"):
                     print(f"[crypto-entry] TRADE PLACED — {sig['signal']} {symbol} "
                           f"@ {result['fill_price']} conf={sig['confidence']:.0f}%")
+                    record_diagnostic("crypto", symbol, "PASS",
+                                      f"order placed @ {result['fill_price']}",
+                                      sig["confidence"])
                     clear_crypto_setup(symbol)
                 else:
+                    record_diagnostic("crypto", symbol, "REJECT",
+                                      f"order failed: {result.get('error')}",
+                                      sig["confidence"])
                     print(f"[crypto-entry] {symbol} order failed: {result.get('error')}")
             except Exception as e:
                 print(f"[crypto-entry] {symbol} error: {e}")
@@ -692,6 +977,8 @@ scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15, **_JOB_OPT
 scheduler.add_job(run_crt_scan,               "cron", hour=12, minute=30, timezone="UTC", **_JOB_OPTS)
 scheduler.add_job(run_crt_scan,               "cron", hour=8,  minute=0,  timezone="UTC", **_JOB_OPTS)
 scheduler.add_job(run_crt_scan,               "interval", minutes=30, **_JOB_OPTS)
+scheduler.add_job(run_silver_bullet_cycle,    "interval", minutes=5, **_JOB_OPTS)
+scheduler.add_job(run_silver_bullet_entry_check, "interval", seconds=30, **_JOB_OPTS)
 scheduler.add_job(run_forex_entry_check,      "interval", seconds=60, **_JOB_OPTS)
 scheduler.add_job(run_forex_position_monitor, "interval", minutes=2, **_JOB_OPTS)
 scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1, **_JOB_OPTS)
@@ -709,9 +996,27 @@ async def startup():
     print(f"[weltbot] v5.0 starting — testnet={BINANCE_TESTNET}")
     db = SessionLocal()
     state = _get_bot_state(db)
-    state.is_running = 1; state.paused = 0
+    from modules.risk_settings import get_settings as _startup_settings
+    # auto_resume controls whether a restart clears a pause. With it off, a
+    # pause that was deliberately set survives a redeploy instead of being
+    # silently undone by the next boot.
+    if _startup_settings().get("auto_resume", True):
+        state.is_running = 1; state.paused = 0; state.pause_reason = None
+    else:
+        state.is_running = 1
     db.commit(); db.close()
-    
+
+    from modules.risk_settings import get_settings
+    rs = get_settings(force=True)
+    print(f"[settings] forex_daily_limit={rs['forex_daily_limit_enabled']} "
+          f"crypto_daily_limit={rs['crypto_daily_limit_enabled']} "
+          f"forex_risk={rs['forex_risk_pct']*100:.2f}% "
+          f"forex_min_conf={rs['forex_min_confidence']:.0f}% "
+          f"diagnostic_mode={rs.get('diagnostic_mode', False)}")
+    if rs.get("diagnostic_mode"):
+        print("[weltbot] DIAGNOSTIC MODE — signals are evaluated and logged, "
+              "but no orders will be submitted, modified, or closed")
+
     from config import FOREX_ENABLED, KRONOS_ENABLED
     
     if FOREX_ENABLED:
@@ -744,7 +1049,8 @@ async def startup():
 
         threading.Thread(target=run_kronos_bias_update, daemon=True).start()
         threading.Thread(target=run_crt_scan, daemon=True).start()
-    
+        threading.Thread(target=run_silver_bullet_cycle, daemon=True).start()
+
     # Crypto 3-layer strategy bootstrap (Kronos + CRT + SMC)
     if KRONOS_ENABLED:
         threading.Thread(target=run_crypto_kronos_bias, daemon=True).start()
@@ -842,6 +1148,25 @@ def start_bot():
     db.commit(); db.close()
     threading.Thread(target=level1_bos_scan, daemon=True).start()
     return {"message": "WeltBot v5.0 started"}
+
+
+@app.post("/api/bot/resume")
+def resume_bot():
+    """
+    Clear a pause without restarting the bot.
+
+    Needed because a tripped drawdown limit used to require waiting until the
+    next day, which made the strategy impossible to evaluate in one sitting.
+    """
+    db    = SessionLocal()
+    state = _get_bot_state(db)
+    was   = state.pause_reason
+    state.is_running = 1
+    state.paused = 0
+    state.pause_reason = None
+    db.commit(); db.close()
+    threading.Thread(target=level1_bos_scan, daemon=True).start()
+    return {"message": "Bot resumed", "cleared_pause": was}
 
 
 @app.post("/api/bot/stop")
