@@ -185,7 +185,6 @@ FOREX_MAX_IMPLIED_RISK_PCT = env_float("FOREX_MAX_IMPLIED_RISK_PCT", 0.05)  # 5%
 
 FOREX_MAX_TRADES   = env_int("FOREX_MAX_TRADES",   3)       # 3 max forex positions
 FOREX_MIN_CONF     = env_float("FOREX_MIN_CONF",   88.0)    # 88% minimum (refined CRT)
-
 # Halt new forex entries once the day's realised loss reaches this share of
 # the balance. Protects a small account from a losing streak.
 FOREX_DAILY_LOSS_LIMIT = env_float("FOREX_DAILY_LOSS_LIMIT", 0.06)   # 6%
@@ -215,6 +214,69 @@ FOREX_LEVERAGE_TIERS = {
 
 # ── Safety ─────────────────────────────────────────────────────────────────────
 LIQUIDATION_BUFFER_ATR = env_float("LIQUIDATION_BUFFER_ATR", 2.5)
+
+# ── Silver Bullet + Volume Profile strategy ────────────────────────────────────
+# Silver Bullet is the ONLY signal-generation strategy in the application. Every
+# enabled instrument below is scanned by it; the CRT/SMC engines are retained on
+# disk for reference but are unreachable from any scheduling or entry path.
+#
+# The roster is DERIVED, never hand-listed, so an instrument cannot be enabled
+# in the crypto universe and then silently never scanned:
+#
+#   forex + metals  <- FOREX_PAIRS (Capital.com)
+#   crypto          <- modules.universe.get_universe() (Binance)
+#
+# `SILVER_BULLET_EXTRA_SYMBOLS` remains as an escape hatch for an instrument
+# that is not in either list (a new listing, a manually pinned pair).
+SILVER_BULLET_EXTRA_SYMBOLS = [
+    s.strip() for s in os.getenv(
+        "SILVER_BULLET_EXTRA_SYMBOLS", ""
+    ).split(",") if s.strip()
+]
+
+
+def _crypto_universe() -> list:
+    """
+    Every enabled Binance symbol, from the universe the crypto engine uses.
+
+    Imported lazily and defensively: a failure here must degrade to "no crypto
+    scanned" rather than to "an empty instrument list", because an empty list
+    would look like a valid configuration with nothing enabled.
+    """
+    try:
+        from modules.universe import get_universe
+        return list(get_universe())
+    except Exception as e:      # pragma: no cover - import-time guard
+        print(f"[config] WARNING: crypto universe unavailable ({e}) — "
+              f"crypto instruments will not be scanned")
+        return []
+
+
+SILVER_BULLET_INSTRUMENTS = list(dict.fromkeys(
+    list(FOREX_PAIRS)
+    + _crypto_universe()
+    + [s for s in SILVER_BULLET_EXTRA_SYMBOLS if s]
+))
+
+# Whether a volume profile may gate an entry when its volume is a range proxy
+# rather than real traded volume. Binance reports genuine traded volume, so
+# every crypto symbol clears it. Capital.com CFDs report only the provider's own
+# cleared contracts, which is a proxy for a decentralised market — gating on
+# that would be gating on time-at-price while calling it volume. Set to true to
+# admit FX/metals profiles too, and label the resulting trades as such.
+VP_REQUIRE_TRUSTED_VOLUME = env_bool("VP_REQUIRE_TRUSTED_VOLUME", True)
+
+# ── Legacy strategy entry lock ────────────────────────────────────────────────
+# The Silver Bullet engine is the unified forex strategy. The older CRT/SMC
+# path is retained only for the dashboard data it publishes (CRT levels, Kronos
+# bias) and must not submit orders while the migration is in progress.
+#
+# Default FALSE — the safe state is the migration, not the exception. The lock
+# is enforced inside `forex_executor.place_forex_order`, the single function
+# that sends a Capital.com order, and it FAILS CLOSED: an unreadable flag denies
+# the order rather than permitting it. Flip this only to run the old strategy
+# deliberately.
+LEGACY_FOREX_ENTRIES_ENABLED = env_bool("LEGACY_FOREX_ENTRIES_ENABLED", False)
 
 # ── Kelly ─────────────────────────────────────────────────────────────────────
 # These are defaults — bot learns live values from actual trade history

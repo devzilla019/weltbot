@@ -14,7 +14,7 @@ export default function PositionCard({position:p,onClose}){
   const rewardPct=p.reward_pct??0;
   const rr=p.risk_reward??0;
 
-  // Refined CRT partial take-profit levels
+  // Silver Bullet partial take-profit levels
   const tp1=p.tp1??null;
   const tp2=p.tp2??null;
   const partialHit=!!p.partial_tp_hit;
@@ -77,7 +77,7 @@ export default function PositionCard({position:p,onClose}){
         <span>SL</span><span>{progress.toFixed(0)}% to TP</span><span>TP</span>
       </div>
 
-      {/* Partial TP (refined CRT) */}
+      {/* Partial TP (Silver Bullet) */}
       {tp1!=null&&(
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:10}}>
           <div style={{background:"rgba(245,185,66,0.08)",border:"1px solid rgba(245,185,66,0.2)",borderRadius:6,padding:"7px 10px"}}>

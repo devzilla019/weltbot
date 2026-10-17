@@ -31,7 +31,7 @@ export default function OverviewTab({summary,portfolio,signals,botStatus,handleC
     <div>
       <div className="hero">
         <div className="hero-title">Autonomous <span className="accent">Trading Engine</span></div>
-        <div className="hero-sub">Kronos AI · CRT · Smart Money Concepts — Forex, Metals & Crypto</div>
+        <div className="hero-sub">Silver Bullet + Volume Profile — Forex, Metals &amp; Crypto</div>
         <div className="hero-chips">
           <span className="hero-chip">Status <b>{botStatus?.running?(botStatus?.paused?"PAUSED":"LIVE"):"STOPPED"}</b></span>
           <span className="hero-chip">Signals <b>{signals.length}</b></span>

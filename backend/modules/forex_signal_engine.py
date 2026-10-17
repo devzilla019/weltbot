@@ -1,12 +1,33 @@
 """
 backend/modules/forex_signal_engine.py
-Layer 3: SMC entry logic for Forex CRT setups
+
+Forex signal logic. Two layers live here:
+
+1. **SMC entry primitives** (order blocks, FVGs, liquidity grabs, Quasimodo,
+   premium/discount) — the CRT/pullback toolkit. `signal_engine` and
+   `crypto_strategy` still import these, so they are kept intact.
+
+2. **The Silver Bullet signal engine** (everything below the
+   `SILVER BULLET SIGNAL ENGINE` banner). This is the authoritative, testable
+   implementation of the forex strategy:
+
+       session window -> liquidity sweep -> MSS -> FVG -> volume-profile
+       confluence -> heuristic confidence -> hard 88 gate -> state machine ->
+       session-scoped pending store -> FVG-retest entry
+
+   `silver_bullet` orchestrates this engine; it does not re-implement it. The
+   daily H4 bias and the previous-day volume profile are PASSED IN from
+   Phase 2 rather than recomputed here, so one symbol can never be scored
+   against two different sets of levels.
+
+A confidence score is a rule-based RANKING of setup quality. It is not a
+probability, and a score of 94 does not mean a 94% chance of success.
 """
 import pandas as pd
 import numpy as np
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -952,4 +973,921 @@ def check_entry_condition_refined(crt_setup: Dict, current_price: float,
 
     except Exception as e:
         logger.error(f"[smc] refined entry check error: {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SILVER BULLET SIGNAL ENGINE
+#
+#  Everything below is the forex strategy. It is deliberately free of
+#  module-scope imports from `silver_bullet` and `volume_profile` so it can be
+#  unit tested without a broker connection, and so the dependency runs one way:
+#
+#      volume_profile  <-  forex_signal_engine  <-  silver_bullet
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Session windows (UTC) ─────────────────────────────────────────────────────
+# name -> (start_hour, end_hour, confidence_bonus)
+#
+# These are the widely-repeated ICT Silver Bullet windows. There is no
+# documented academic source for them: they are community doctrine, not
+# evidence. They are implemented faithfully because they define the strategy,
+# not because the times themselves have demonstrated an edge.
+#
+# 15:00-16:00 UTC (the "NY morning" window) contains the 12:30 and 14:00 UTC US
+# data releases, so a material share of its sweeps are news-driven. A liquidity
+# sweep caused by a data release is not the setup this strategy describes, so
+# NEWS_BLACKOUT_WINDOWS refuses to trade through one.
+SESSIONS: Dict[str, Tuple[int, int, int]] = {
+    "LONDON":       (8,  9,  3),
+    "NY_MORNING":   (15, 16, 4),   # institutional prime time
+    "NY_AFTERNOON": (19, 20, 2),
+}
+
+# High-impact US data lands at 12:30 and 14:00 UTC in US daylight time, inside
+# the NY_MORNING window. Times are (hour, minute) UTC, inclusive of the guard.
+NEWS_BLACKOUT_WINDOWS = [
+    ((12, 25), (12, 45)),
+    ((13, 55), (14, 15)),
+]
+
+# ── Setup quality thresholds ──────────────────────────────────────────────────
+# The score is a ranking, not a probability. 88 is a hard floor: a setup that
+# does not reach it is never executable, however clean its geometry.
+CONFIDENCE_BASE    = 85
+MIN_CONFIDENCE     = 88
+STRONG_CONFIDENCE  = 93
+ELITE_CONFIDENCE   = 96
+
+# ── Detection constants ───────────────────────────────────────────────────────
+SWING_LOOKBACK     = 5     # candles before the window used to mark liquidity
+MIN_SWEEP_BODY_PCT = 0.40  # sweep candle body must exceed this share of its range
+MSS_MAX_CANDLES    = 3     # MSS must occur within this many candles of the sweep
+FVG_MAX_AGE        = 10    # FVG must form within this many candles of the sweep
+
+# How many of the newest candles are scanned for a sweep.
+SWEEP_SCAN_CANDLES = 10
+
+# Stop buffer beyond the sweep wick, and the sanity ceiling on stop width.
+# SL_MAX_ATR is NOT the risk control — see `check_entry_retest`.
+SL_ATR_BUFFER      = 0.5
+SL_MAX_ATR         = 6.0
+
+# ── Setup states ──────────────────────────────────────────────────────────────
+# The pipeline is strictly ordered, so a setup's state names the last stage it
+# cleared. `advance_setup` never moves a setup backwards.
+STATE_WAITING        = "WAITING"
+STATE_SWEEP_DETECTED = "SWEEP_DETECTED"
+STATE_MSS_CONFIRMED  = "MSS_CONFIRMED"
+STATE_FVG_FOUND      = "FVG_FOUND"
+STATE_IN_TRADE       = "IN_TRADE"
+STATE_EXPIRED        = "EXPIRED"
+STATE_INVALID        = "INVALID"
+
+# Terminal states a setup can never leave.
+TERMINAL_STATES = (STATE_EXPIRED, STATE_INVALID, STATE_IN_TRADE)
+
+# The forward order of the live states, used to reject backwards transitions.
+_STATE_ORDER = [
+    STATE_WAITING,
+    STATE_SWEEP_DETECTED,
+    STATE_MSS_CONFIRMED,
+    STATE_FVG_FOUND,
+    STATE_IN_TRADE,
+]
+
+
+# ── Session clock ─────────────────────────────────────────────────────────────
+
+def current_session(now: Optional[datetime] = None) -> Optional[str]:
+    """Name of the session window currently open, or None."""
+    hour = (now or datetime.utcnow()).hour
+    for name, (start, end, _) in SESSIONS.items():
+        if start <= hour < end:
+            return name
+    return None
+
+
+def session_bounds(session_name: str,
+                   now: Optional[datetime] = None) -> Tuple[datetime, datetime]:
+    """
+    Today's UTC (open, close) datetimes for a session.
+
+    Derived from the UTC day of `now` rather than from `utcnow().replace(hour=...)`
+    so the window cannot drift by a day when called at 23:5x.
+    """
+    start_hour, end_hour, _ = SESSIONS[session_name]
+    ref = now or datetime.utcnow()
+    base = datetime(ref.year, ref.month, ref.day)
+    return (base.replace(hour=start_hour),
+            base.replace(hour=end_hour))
+
+
+def session_minutes_until_open(session_name: str,
+                               now: Optional[datetime] = None) -> float:
+    """Minutes until the named session opens today; negative once it has."""
+    ref = now or datetime.utcnow()
+    open_dt, _ = session_bounds(session_name, ref)
+    return (open_dt - ref).total_seconds() / 60.0
+
+
+def session_time_remaining(session_name: Optional[str],
+                           now: Optional[datetime] = None) -> int:
+    """Seconds until the named session closes (0 when it is not open)."""
+    if not session_name:
+        return 0
+    ref = now or datetime.utcnow()
+    _, close = session_bounds(session_name, ref)
+    return max(0, int((close - ref).total_seconds()))
+
+
+def sessions_opening_within(minutes: int = 5,
+                            now: Optional[datetime] = None) -> List[str]:
+    """
+    Sessions whose window opens within the next `minutes`.
+
+    Used by the pre-session job so it marks each window once, shortly before it
+    opens, instead of continuously from midnight.
+    """
+    ref = now or datetime.utcnow()
+    out = []
+    for name in SESSIONS:
+        until = session_minutes_until_open(name, ref)
+        if 0 < until <= minutes:
+            out.append(name)
+    return out
+
+
+def in_news_blackout(now: Optional[datetime] = None) -> Tuple[bool, Optional[str]]:
+    """
+    True while a scheduled high-impact release window is open.
+
+    A sweep that a data release caused is not the setup this strategy
+    describes, and the stop is far wider than the release's spike, so the trade
+    is refused rather than sized around it.
+
+    Returns (blocked, label).
+    """
+    ref = now or datetime.utcnow()
+    minutes = ref.hour * 60 + ref.minute
+    for (sh, sm), (eh, em) in NEWS_BLACKOUT_WINDOWS:
+        if sh * 60 + sm <= minutes <= eh * 60 + em:
+            return True, f"{sh:02d}:{sm:02d}-{eh:02d}:{em:02d} UTC"
+    return False, None
+
+
+def session_schedule(now: Optional[datetime] = None) -> List[Dict]:
+    """
+    Today's session windows for the dashboard.
+
+    Served from here so the frontend stops keeping its own copy of the hours —
+    a fourth hardcoded copy of the schedule is how the UI and the engine drift
+    apart.
+    """
+    ref = now or datetime.utcnow()
+    active = current_session(ref)
+    blocked, label = in_news_blackout(ref)
+    out = []
+    for name, (start_hour, end_hour, _) in SESSIONS.items():
+        open_dt, close_dt = session_bounds(name, ref)
+        out.append({
+            "session": name,
+            "open_utc": open_dt.strftime("%H:%M"),
+            "close_utc": close_dt.strftime("%H:%M"),
+            "active": active == name,
+            "blocked": bool(blocked and active == name),
+            "blocked_by": label if active == name else None,
+        })
+    return out
+
+
+# ── Candle helpers ────────────────────────────────────────────────────────────
+
+def _frame(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Positional-indexed copy, so every detector indexes the same way."""
+    if df is None or len(df) == 0:
+        return None
+    return df.reset_index(drop=True)
+
+
+def closed_candles_only(df: Optional[pd.DataFrame], timeframe: str,
+                        now: Optional[datetime] = None) -> Optional[pd.DataFrame]:
+    """
+    Drop the still-forming candle so no detector can read an incomplete bar.
+
+    Capital.com returns the in-progress candle as the last row. Using it means
+    the bar's high/low/close are not final when the setup is evaluated, so the
+    same timestamp can produce a different setup depending on the second the
+    scan ran. That is look-ahead bias in its most insidious form: invisible in
+    both backtest and live, and it makes the setup non-reproducible.
+
+    Bar boundaries are derived from the UTC clock, not from the data, so this
+    works even when the feed is missing recent candles. The boundary is floored
+    on the UNIX epoch, not on the current hour: at 13:00 UTC the live 4-hour bar
+    is the one that opened at 12:00, and flooring to the hour would leave it in
+    the frame.
+    """
+    if df is None or len(df) == 0:
+        return df
+    if "timestamp" not in df.columns:
+        return df
+
+    minutes = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}.get(timeframe)
+    if minutes is None:
+        return df
+
+    ref = now or datetime.utcnow()
+    if ref.tzinfo is not None:
+        from datetime import timezone
+        ref = ref.astimezone(timezone.utc).replace(tzinfo=None)
+
+    epoch = datetime(1970, 1, 1)
+    elapsed = int((ref - epoch).total_seconds() // 60)
+    period_start = epoch + timedelta(minutes=(elapsed // minutes) * minutes)
+
+    try:
+        ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        cutoff = pd.Timestamp(period_start, tz="UTC")
+        keep = df[ts < cutoff]
+        return keep.reset_index(drop=True) if len(keep) else df
+    except Exception:
+        return df
+
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Average true range of the entry timeframe. 0.0 when there is too little
+    history, which callers treat as "cannot size a stop" rather than as a zero
+    risk.
+    """
+    try:
+        if df is None or len(df) < period + 1:
+            return 0.0
+        high, low = df["high"].astype(float), df["low"].astype(float)
+        close = df["close"].astype(float)
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+        return float(atr) if pd.notna(atr) else 0.0
+    except Exception as e:
+        logger.error(f"[silver] ATR error: {e}")
+        return 0.0
+
+
+# ── Stage 1: liquidity sweep ──────────────────────────────────────────────────
+
+def detect_liquidity_sweep(df_5m: pd.DataFrame, session_levels: Dict,
+                           h4_bias: str) -> Optional[Dict]:
+    """
+    A sweep is a candle that wicks beyond the session swing and closes back
+    inside, with a body strong enough to be a rejection rather than a doji.
+
+    BUY  setup: low < swing_low  AND close > swing_low
+    SELL setup: high > swing_high AND close < swing_high
+
+    The daily H4 bias is a hard filter: a sweep of the lows is only a setup when
+    the higher timeframe is bullish. Sweeping WITH the higher timeframe is a
+    breakout, not the reversal this strategy trades.
+    """
+    try:
+        df = _frame(df_5m)
+        if df is None or len(df) < 5 or not session_levels:
+            return None
+
+        swing_high = session_levels.get("swing_high")
+        swing_low = session_levels.get("swing_low")
+        if swing_high is None or swing_low is None:
+            return None
+
+        # Scan the most recent candles, newest first.
+        recent = df.tail(SWEEP_SCAN_CANDLES)
+        offset = len(df) - len(recent)      # convert to an absolute index
+        for i in range(len(recent) - 1, -1, -1):
+            c = recent.iloc[i]
+            o, h, l, cl = (float(c["open"]), float(c["high"]),
+                           float(c["low"]), float(c["close"]))
+            rng = h - l
+            if rng <= 0:
+                continue
+            body_pct = abs(cl - o) / rng
+
+            swept_low = l < swing_low and cl > swing_low
+            swept_high = h > swing_high and cl < swing_high
+
+            if swept_low and h4_bias == "BULLISH":
+                if body_pct < MIN_SWEEP_BODY_PCT:
+                    continue
+                return {
+                    "direction": "BUY",
+                    "sweep_level": swing_low,
+                    "sweep_wick": l,
+                    "sweep_close": cl,
+                    # Absolute position in df_5m, so downstream detectors
+                    # (MSS, FVG) can index the same frame directly.
+                    "sweep_index": offset + i,
+                    "body_pct": round(body_pct, 3),
+                }
+
+            if swept_high and h4_bias == "BEARISH":
+                if body_pct < MIN_SWEEP_BODY_PCT:
+                    continue
+                return {
+                    "direction": "SELL",
+                    "sweep_level": swing_high,
+                    "sweep_wick": h,
+                    "sweep_close": cl,
+                    "sweep_index": offset + i,
+                    "body_pct": round(body_pct, 3),
+                }
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[silver] sweep detection error: {e}")
+        return None
+
+
+# ── Stage 2: market structure shift ───────────────────────────────────────────
+
+def detect_mss(df_5m: pd.DataFrame, sweep: Dict,
+               max_candles: int = MSS_MAX_CANDLES) -> Optional[Dict]:
+    """
+    Market Structure Shift — after the sweep, price must CLOSE beyond the
+    opposing swing within `max_candles`.
+
+    BUY:  close above the most recent 5m swing high before the sweep
+    SELL: close below the most recent 5m swing low before the sweep
+
+    A close is required, not a wick: a wick through the level that closes back
+    inside is the same failed move the sweep was, not a shift in structure.
+    """
+    try:
+        df = _frame(df_5m)
+        if df is None or not sweep:
+            return None
+
+        sweep_idx = sweep.get("sweep_index")
+        if sweep_idx is None or sweep_idx < 3:
+            return None
+
+        before = df.iloc[:sweep_idx]
+        if len(before) < 3:
+            return None
+
+        direction = sweep["direction"]
+        after = df.iloc[sweep_idx + 1: sweep_idx + 1 + max_candles]
+
+        if direction == "BUY":
+            level = float(before["high"].tail(SWING_LOOKBACK).max())
+            for offset, (_, c) in enumerate(after.iterrows(), start=1):
+                if float(c["close"]) > level:
+                    return {
+                        "direction": "BUY",
+                        "mss_level": level,
+                        "mss_index": sweep_idx + offset,
+                        "candles_to_mss": offset,
+                    }
+        else:
+            level = float(before["low"].tail(SWING_LOOKBACK).min())
+            for offset, (_, c) in enumerate(after.iterrows(), start=1):
+                if float(c["close"]) < level:
+                    return {
+                        "direction": "SELL",
+                        "mss_level": level,
+                        "mss_index": sweep_idx + offset,
+                        "candles_to_mss": offset,
+                    }
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[silver] MSS detection error: {e}")
+        return None
+
+
+# The master specification spells this `detect_msss`. Both names resolve to the
+# same function so a caller using either spelling cannot silently get a
+# different (or missing) implementation.
+detect_msss = detect_mss
+
+
+# ── Stage 3: fair value gap ───────────────────────────────────────────────────
+
+def find_fvg_after_sweep(df_5m: pd.DataFrame, sweep: Dict,
+                         max_age: int = FVG_MAX_AGE) -> Optional[Dict]:
+    """
+    Fair value gap formed AFTER the sweep, within `max_age` candles.
+
+    A three-candle imbalance: with candles i, i+1, i+2,
+
+        bullish  candles[i+2].low  > candles[i].high   -> gap [i.high, i+2.low]
+        bearish  candles[i+2].high < candles[i].low    -> gap [i+2.high, i.low]
+
+    `single_candle` reports whether the gap was left by ONE displacement candle
+    (candle i+1 alone spanning the gap), which is the stronger imbalance. The
+    gap is a three-candle structure either way, so this is a quality flag, not a
+    claim that the gap is one candle wide.
+    """
+    try:
+        df = _frame(df_5m)
+        if df is None or len(df) < 5 or not sweep:
+            return None
+
+        sweep_idx = sweep.get("sweep_index")
+        if sweep_idx is None:
+            return None
+
+        start = sweep_idx + 1
+        end = min(len(df) - 2, start + max_age)
+
+        for i in range(start, end):
+            c1 = df.iloc[i]
+            c3 = df.iloc[i + 2]
+            c2 = df.iloc[i + 1]
+
+            if sweep["direction"] == "BUY":
+                if float(c3["low"]) > float(c1["high"]):
+                    high = float(c3["low"])
+                    low = float(c1["high"])
+                    return {
+                        "fvg_high": round(high, 5),
+                        "fvg_low": round(low, 5),
+                        "fvg_midpoint": round((high + low) / 2, 5),
+                        "fvg_index": i,
+                        "type": "bullish_fvg",
+                        "direction": "BUY",
+                        "single_candle": bool(float(c1["high"]) >= float(c2["low"])),
+                    }
+            else:
+                if float(c3["high"]) < float(c1["low"]):
+                    high = float(c1["low"])
+                    low = float(c3["high"])
+                    return {
+                        "fvg_high": round(high, 5),
+                        "fvg_low": round(low, 5),
+                        "fvg_midpoint": round((high + low) / 2, 5),
+                        "fvg_index": i,
+                        "type": "bearish_fvg",
+                        "direction": "SELL",
+                        "single_candle": bool(float(c1["low"]) <= float(c2["high"])),
+                    }
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[silver] FVG detection error: {e}")
+        return None
+
+
+# ── Stage 4: volume profile confluence ────────────────────────────────────────
+
+def volume_profile_confluence(fvg: Optional[Dict], vp: Optional[Dict]) -> Dict:
+    """
+    Grade the FVG against the previous-day POC / VAH / VAL.
+
+    Thin wrapper over `volume_profile.check_fvg_confluence`, imported lazily so
+    this module keeps a single direction of dependency. The profile itself is
+    the one Phase 2 built: it is never rebuilt here, so the levels a setup is
+    graded against are exactly the levels the bias record reports.
+    """
+    from modules.volume_profile import check_fvg_confluence
+    return check_fvg_confluence(fvg, vp)
+
+
+def volume_profile_gateable(vp: Optional[Dict],
+                            require_trusted_volume: bool = True) -> Tuple[bool, str]:
+    """Whether the profile is fit to gate an entry on (see volume_profile)."""
+    from modules.volume_profile import gateable
+    return gateable(vp, require_trusted_volume=require_trusted_volume)
+
+
+# ── Stage 5: heuristic confidence ─────────────────────────────────────────────
+
+def calculate_confidence(bias_data: Dict, sweep: Dict, mss: Dict,
+                         fvg: Dict, vp_confluence: Dict,
+                         session_name: str) -> int:
+    """
+    Rank a setup's quality from `CONFIDENCE_BASE` (85) upwards, capped at 99.
+
+    This is a rule-based RANKING of how many of the strategy's own conditions
+    lined up. It is NOT a probability: a 94 is a well-formed setup by these
+    rules, not a 94% chance of winning. Nothing downstream may present it as
+    one.
+
+    The score can legitimately land below the 88 floor — the volume-profile term
+    is negative without confluence — which is how a structurally valid but badly
+    located setup gets rejected.
+    """
+    try:
+        confidence = CONFIDENCE_BASE
+        bias_data = bias_data or {}
+        vp_confluence = vp_confluence or {}
+        sweep = sweep or {}
+        mss = mss or {}
+        fvg = fvg or {}
+
+        # ── Volume profile ───────────────────────────────────────────────────
+        grade = vp_confluence.get("grade", "NO_CONFLUENCE")
+        if grade == "POC_OVERLAP":
+            confidence += 8
+        elif grade in ("VAH_CONFLUENCE", "VAL_CONFLUENCE"):
+            confidence += 5
+        elif grade == "INSIDE_VALUE":
+            confidence += 1
+        else:
+            confidence -= 3
+
+        # Price trading outside the value area in the bias direction is the
+        # location the strategy wants; at the POC it is a chop zone.
+        if bias_data.get("price_position") in ("ABOVE_VALUE", "BELOW_VALUE"):
+            confidence += 3
+        elif bias_data.get("price_position") == "AT_POC":
+            confidence -= 2
+
+        # ── Market structure ─────────────────────────────────────────────────
+        strength = bias_data.get("strength", 0)
+        if strength >= 3:
+            confidence += 5
+        elif strength == 2:
+            confidence += 3
+        elif bias_data.get("h4_bias") == "NEUTRAL":
+            confidence -= 5
+
+        # ── Session ──────────────────────────────────────────────────────────
+        confidence += SESSIONS.get(session_name, (0, 0, 0))[2]
+
+        # ── Setup quality ────────────────────────────────────────────────────
+        body_pct = sweep.get("body_pct", 0.0)
+        if body_pct > 0.70:
+            confidence += 3
+        elif body_pct >= 0.50:
+            confidence += 2
+
+        if mss.get("candles_to_mss", 99) == 1:
+            confidence += 2
+
+        if fvg.get("single_candle"):
+            confidence += 2
+
+        return int(min(confidence, 99))
+
+    except Exception as e:
+        logger.error(f"[silver] confidence error: {e}")
+        return 0
+
+
+def is_executable(confidence: Optional[float],
+                  minimum: int = MIN_CONFIDENCE) -> bool:
+    """
+    The hard gate. A score below the floor is never executable.
+
+    Guarded against a missing or unparseable score: an unknown score fails
+    closed, because treating it as passing would let a broken scoring path
+    authorise a trade.
+    """
+    try:
+        if confidence is None:
+            return False
+        return float(confidence) >= float(minimum)
+    except (TypeError, ValueError):
+        return False
+
+
+# ── Setup record and state machine ────────────────────────────────────────────
+
+def new_setup(symbol: str, session_name: str, direction: str,
+              now: Optional[datetime] = None) -> Dict:
+    """A fresh setup record in the WAITING state."""
+    ref = now or datetime.utcnow()
+    return {
+        "symbol": symbol,
+        "session": session_name,
+        "direction": direction,
+        "state": STATE_WAITING,
+        "history": [STATE_WAITING],
+        "sweep": None,
+        "mss": None,
+        "fvg": None,
+        "vp_levels": None,
+        "vp_confluence": None,
+        "confidence": 0,
+        "executable": False,
+        "reject_reason": None,
+        "entry_taken": False,
+        "entry": None,
+        "date": ref.strftime("%Y-%m-%d"),
+        "created_at": ref.isoformat(),
+        "updated_at": ref.isoformat(),
+    }
+
+
+def advance_setup(setup: Dict, state: str,
+                  now: Optional[datetime] = None) -> Dict:
+    """
+    Move a setup forward in the pipeline.
+
+    Transitions are checked, not trusted:
+
+      * a terminal setup (EXPIRED / INVALID / IN_TRADE) never moves again, so an
+        expired setup cannot be revived by a later scan;
+      * a live setup never moves backwards, so a stale FVG cannot be re-labelled
+        as merely MSS_CONFIRMED and re-entered later.
+
+    Returns the setup, unchanged when the transition is refused.
+    """
+    if not setup:
+        return setup
+
+    current = setup.get("state")
+    if current in TERMINAL_STATES:
+        return setup
+
+    if state in TERMINAL_STATES:
+        setup["state"] = state
+    elif state in _STATE_ORDER and current in _STATE_ORDER:
+        if _STATE_ORDER.index(state) <= _STATE_ORDER.index(current):
+            return setup
+        setup["state"] = state
+    else:
+        logger.warning(f"[silver] unknown setup state {state!r} — ignored")
+        return setup
+
+    setup["updated_at"] = (now or datetime.utcnow()).isoformat()
+    setup.setdefault("history", []).append(setup["state"])
+    return setup
+
+
+def invalidate_setup(setup: Dict, reason: str,
+                     now: Optional[datetime] = None) -> Dict:
+    """Mark a setup INVALID with the reason it was rejected."""
+    if not setup:
+        return setup
+    setup["reject_reason"] = reason
+    return advance_setup(setup, STATE_INVALID, now)
+
+
+def expire_setup(setup: Dict, now: Optional[datetime] = None) -> Dict:
+    """Mark a setup EXPIRED — its session window closed, or its day rolled."""
+    if not setup:
+        return setup
+    setup["reject_reason"] = setup.get("reject_reason") or "session window closed"
+    return advance_setup(setup, STATE_EXPIRED, now)
+
+
+def setup_is_expired(setup: Dict, now: Optional[datetime] = None) -> bool:
+    """
+    Whether a setup is past its session expiry or its UTC day.
+
+    The expiry is the session CLOSE, not a fixed number of minutes: the setup
+    only exists because the session is open, so it dies with the session. A
+    setup that somehow survives midnight in memory is dropped here rather than
+    becoming sweepable against another day's liquidity.
+    """
+    if not setup:
+        return True
+    if setup.get("state") in TERMINAL_STATES:
+        return True
+
+    ref = now or datetime.utcnow()
+    if setup.get("date") and setup["date"] != ref.strftime("%Y-%m-%d"):
+        return True
+
+    sess = setup.get("session")
+    if not sess or sess not in SESSIONS:
+        return False
+    _, close = session_bounds(sess, ref)
+    return ref >= close
+
+
+def build_setup(symbol: str, df_5m: pd.DataFrame, session_levels: Dict,
+                bias_data: Dict, session_name: str,
+                now: Optional[datetime] = None) -> Dict:
+    """
+    Run the whole detection pipeline for one symbol and return the setup record.
+
+    The record ALWAYS comes back, whatever happened: its `state` says how far the
+    pipeline got and `reject_reason` says why it stopped. Returning None for a
+    rejection would throw away the reason, and a strategy that cannot explain
+    why it declined a trade cannot be debugged.
+
+    `bias_data` is the Phase 2 daily-bias record. Its `vp_levels` are reused
+    as-is; the profile is never recomputed here.
+    """
+    ref = now or datetime.utcnow()
+    bias_data = bias_data or {}
+
+    h4_bias = bias_data.get("h4_bias")
+    setup = new_setup(symbol, session_name, "NONE", ref)
+
+    if h4_bias not in ("BULLISH", "BEARISH"):
+        return invalidate_setup(
+            setup, f"no directional daily bias ({h4_bias})", ref)
+
+    sweep = detect_liquidity_sweep(df_5m, session_levels, h4_bias)
+    if not sweep:
+        return invalidate_setup(
+            setup,
+            f"no {h4_bias.lower()} liquidity sweep of the pre-session swing", ref)
+
+    setup["direction"] = sweep["direction"]
+    setup["sweep"] = sweep
+    advance_setup(setup, STATE_SWEEP_DETECTED, ref)
+
+    mss = detect_mss(df_5m, sweep)
+    if not mss:
+        return invalidate_setup(
+            setup, f"no MSS within {MSS_MAX_CANDLES} candles of the sweep", ref)
+
+    setup["mss"] = mss
+    advance_setup(setup, STATE_MSS_CONFIRMED, ref)
+
+    fvg = find_fvg_after_sweep(df_5m, sweep)
+    if not fvg:
+        return invalidate_setup(
+            setup, f"no FVG within {FVG_MAX_AGE} candles of the sweep", ref)
+
+    setup["fvg"] = fvg
+    advance_setup(setup, STATE_FVG_FOUND, ref)
+
+    # ── Volume profile confluence, from the Phase 2 profile ──────────────────
+    vp = bias_data.get("vp_levels")
+    setup["vp_levels"] = vp
+    vp_confluence = volume_profile_confluence(fvg, vp)
+    setup["vp_confluence"] = vp_confluence.get("grade")
+    setup["vp_source"] = vp_confluence.get("volume_source")
+    setup["vp_trusted"] = bool(vp_confluence.get("source_trusted"))
+    setup["vp_profile_valid"] = bool(vp_confluence.get("profile_valid"))
+    setup["vp_confluence_detail"] = vp_confluence
+
+    # A profile that cannot be gated on does not authorise an entry. Whether a
+    # range proxy is acceptable is a config decision made once, in Phase 2's
+    # `gateable`, not a second opinion invented here.
+    gate_ok, gate_reason = volume_profile_gateable(vp)
+    setup["vp_gateable"] = gate_ok
+    setup["vp_gate_reason"] = gate_reason
+    if not gate_ok:
+        return invalidate_setup(
+            setup, f"volume profile not gateable: {gate_reason}", ref)
+
+    # ── Confidence and the hard floor ────────────────────────────────────────
+    confidence = calculate_confidence(bias_data, sweep, mss, fvg,
+                                      vp_confluence, session_name)
+    setup["confidence"] = confidence
+    setup["executable"] = is_executable(confidence)
+    setup["expires_at"] = session_bounds(session_name, ref)[1].isoformat()
+
+    if not setup["executable"]:
+        return invalidate_setup(
+            setup, f"confidence {confidence} below the {MIN_CONFIDENCE} floor", ref)
+
+    return setup
+
+
+# ── Stage 6: FVG-retest entry ─────────────────────────────────────────────────
+
+def check_entry_retest(setup: Dict, current_price: float,
+                       df_5m: pd.DataFrame,
+                       now: Optional[datetime] = None) -> Optional[Dict]:
+    """
+    Fire when price returns into the stored FVG.
+
+    This is the strategy's entry condition: the setup arms on the
+    sweep/MSS/FVG sequence and only fills when price trades back into the gap.
+    Returns the signal dict, or None when the entry condition is not met.
+
+    Three refusals guard the trade:
+
+      * a setup that is not executable is refused outright, so a sub-88 score
+        can never produce an order even if it reached the store;
+      * an expired setup is refused;
+      * `entry_taken` makes the entry idempotent — the entry job runs every 30
+        seconds and price sits inside the gap for several of those runs, so
+        without the flag the same setup would open a position on every tick.
+        The flag is set the moment the condition is met, not after the order
+        succeeds, because the caller may be retrying a placement that already
+        partially filled.
+
+    The stop sits beyond the sweep wick, because that wick is the level the
+    setup says was defended.
+    """
+    try:
+        from modules.forex_executor import calculate_stops_and_targets
+        if not setup or current_price is None:
+            return None
+
+        ref = now or datetime.utcnow()
+
+        if not setup.get("executable"):
+            logger.debug(f"[silver] {setup.get('symbol')} entry refused — not executable")
+            return None
+
+        if setup.get("entry_taken"):
+            return None
+
+        if setup_is_expired(setup, ref):
+            expire_setup(setup, ref)
+            return None
+
+        fvg = setup.get("fvg") or {}
+        direction = setup.get("direction")
+        fvg_low = float(fvg.get("fvg_low") or 0.0)
+        fvg_high = float(fvg.get("fvg_high") or 0.0)
+        if fvg_low <= 0 or fvg_high <= 0 or fvg_high < fvg_low:
+            return None
+
+        # The retest: price must be inside the gap.
+        if not (fvg_low <= current_price <= fvg_high):
+            return None
+
+        atr = calculate_atr(df_5m)
+        if atr <= 0:
+            return None
+
+        sweep = setup.get("sweep") or {}
+        symbol = setup.get("symbol", "?")
+        sweep_wick = float(sweep.get("sweep_wick", 0.0))
+        if sweep_wick <= 0:
+            return None
+
+        entry = current_price
+
+        # The spec caps the stop at 2 ATR, but also places entry at the FVG
+        # (above the swept swing) and the stop at the sweep wick (below it).
+        # That structural span alone is routinely 2-4 ATR, so a 2-ATR cap
+        # rejects every setup the strategy defines. Risk is controlled by
+        # position sizing instead — a wider stop buys a smaller position.
+        # SL_MAX_ATR here only refuses genuinely absurd (stale-wick) setups.
+        structural_risk = abs(entry - sweep_wick)
+        if structural_risk > SL_MAX_ATR * atr:
+            logger.info(f"[silver] {symbol} structural stop "
+                        f"{structural_risk / atr:.2f} ATR > {SL_MAX_ATR} ATR — "
+                        f"wick too far from price, skip")
+            return None
+
+        if direction == "BUY":
+            sl = sweep_wick - (SL_ATR_BUFFER * atr)
+        else:
+            sl = sweep_wick + (SL_ATR_BUFFER * atr)
+
+        # ── Targets ──────────────────────────────────────────────────────────
+        # The stop and TP1/TP2 are decided HERE, from the geometry of the setup.
+        # TP3 is the one target the specification derives from the market rather
+        # than from R, so it is delegated to the executor's calculation, which
+        # applies the liquidity-target rules and the high-confidence extension
+        # in one place. Duplicating that rule here would let the level the trade
+        # is recorded with differ from the level it is managed against.
+        targets = calculate_stops_and_targets(
+            symbol, direction, entry, sweep_wick, atr,
+            setup.get("confidence", 0),
+            liquidity_target=setup.get("liquidity_target"),
+        )
+        if not targets:
+            logger.info(f"[silver] {symbol} stop/target calculation refused "
+                        f"the setup")
+            return None
+
+        sl = targets["stop_loss"]
+        risk = targets["risk"]
+        tp1 = targets["tp1"]
+        tp2 = targets["tp2"]
+        tp3 = targets["tp3"]
+
+        signal = {
+            "symbol": symbol,
+            "signal": direction,
+            "entry_price": round(entry, 5),
+            "stop_loss": round(sl, 5),
+            "take_profit": round(tp3, 5),      # broker-level TP = final target
+            "tp1": round(tp1, 5),
+            "tp2": round(tp2, 5),
+            "tp3": round(tp3, 5),
+            "tp3_extended": targets["tp3_extended"],
+            "risk_distance": round(risk, 5),
+            "atr": round(atr, 5),
+            "confidence": setup.get("confidence", 0),
+            "entry_type": "SILVER_BULLET_FVG",
+            "session": setup.get("session"),
+            "expires_at": setup.get("expires_at"),
+            "vp_confluence": setup.get("vp_confluence"),
+            "trend_direction": setup.get("bias"),
+            "crt_setup": "SILVER_BULLET",
+            "crt_timeframe": "5m",
+            "confirm_timeframe": "5m",
+            "entry_timeframe": "5m",
+            "poi": "fvg",
+            "state": STATE_IN_TRADE,
+            "timestamp": ref.isoformat(),
+        }
+
+        # Consume the setup: one entry per setup, however many times the job runs.
+        setup["entry_taken"] = True
+        setup["entry"] = signal
+        advance_setup(setup, STATE_IN_TRADE, ref)
+        return signal
+
+    except Exception as e:
+        logger.error(f"[silver] entry check error: {e}")
         return None

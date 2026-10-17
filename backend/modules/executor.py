@@ -34,8 +34,150 @@ def _round_step(qty: float, step: float) -> float:
     return round(math.floor(qty / step) * step, decimals)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SILVER BULLET CRYPTO SIZING
+#
+#  BTC/ETH quantity on Binance is in BASE-ASSET units on a step grid — there is
+#  no "lot". It therefore does NOT share the Capital.com contract table in
+#  modules/forex_executor.py, and this section deliberately reuses the same
+#  confidence tiers by importing them rather than restating them, so the two
+#  venues cannot drift apart on how much a given score is worth.
+#
+#  This is additive: the SMC path above still calls calculate_risk_with_compounding
+#  exactly as before.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Crypto has no lot, so the size grid is the exchange's step size. These are the
+# conservative fallbacks used only when the live rules cannot be fetched.
+_CRYPTO_FALLBACK_STEP = {"BTCUSDT": 0.001, "ETHUSDT": 0.001}
+_CRYPTO_FALLBACK_MIN_NOTIONAL = 5.0
+
+
+def crypto_step_and_min(symbol: str) -> tuple:
+    """
+    (step, min_notional) for a crypto symbol, preferring the exchange's rules.
+
+    Falls back to KNOWN_RULES when the exchange is unreachable, so sizing still
+    produces a valid grid-aligned quantity rather than a rejected order.
+    """
+    sym_clean = (symbol or "").upper().replace("/", "")
+    try:
+        from modules.market_data import get_lot_size_rules
+        live = get_lot_size_rules(symbol)
+        step = float(live.get("step_size") or 0) or None
+        min_notional = float(live.get("min_notional") or 0) or None
+        if step:
+            return step, (min_notional or _CRYPTO_FALLBACK_MIN_NOTIONAL)
+    except Exception:
+        pass
+
+    rule = KNOWN_RULES.get(sym_clean, {})
+    return (rule.get("step") or _CRYPTO_FALLBACK_STEP.get(sym_clean, 0.001),
+            rule.get("min_notional") or _CRYPTO_FALLBACK_MIN_NOTIONAL)
+
+
+def calculate_silver_bullet_crypto_size(symbol: str, entry: float, stop_loss: float,
+                                        confidence: float, balance: float,
+                                        risk_pct: float = None) -> dict:
+    """
+    Position size in BASE-ASSET units for a Silver Bullet crypto entry.
+
+    risk_quote = balance * risk_pct * tier * drawdown_guard
+    qty        = risk_quote / |entry - stop_loss|
+
+    The confidence tier and the drawdown guard come from
+    `forex_executor.effective_size_multiplier`, so a 93 scores the same
+    fraction of risk on BTC as it does on EURUSD. The result is snapped DOWN to
+    the exchange's step grid and refused when it is below the exchange's
+    minimum notional, because a sub-minimum order is rejected by Binance and
+    silently opening a larger one would exceed the risk the caller asked for.
+
+    Returns {ok, qty, reason, risk_quote, risk_pct, multiplier, notional, step}.
+    """
+    out = {"ok": False, "qty": 0.0, "reason": None, "risk_quote": 0.0,
+           "risk_pct": 0.0, "multiplier": 0.0, "notional": 0.0, "step": 0.0}
+    try:
+        from modules.forex_executor import effective_size_multiplier
+        from config import MAX_RISK_PCT
+
+        entry = float(entry)
+        stop_loss = float(stop_loss)
+        balance = float(balance)
+
+        if not all(math.isfinite(v) for v in (entry, stop_loss, balance)):
+            out["reason"] = "non-finite input"
+            return out
+        if entry <= 0 or balance <= 0:
+            out["reason"] = "non-positive price or balance"
+            return out
+
+        risk_distance = abs(entry - stop_loss)
+        if risk_distance <= 0:
+            out["reason"] = "zero stop distance"
+            return out
+
+        base_pct = float(risk_pct) if risk_pct is not None else float(MAX_RISK_PCT)
+
+        mult, detail = effective_size_multiplier(confidence, balance)
+        out["multiplier"] = mult
+        if mult <= 0:
+            out["reason"] = detail.get("reason") or "size multiplier is zero"
+            return out
+
+        risk_quote = balance * base_pct * mult
+        out["risk_quote"] = round(risk_quote, 4)
+        out["risk_pct"] = round(base_pct * mult, 6)
+
+        raw_qty = risk_quote / risk_distance
+
+        step, min_notional = crypto_step_and_min(symbol)
+        out["step"] = step
+        qty = _round_step(raw_qty, step)
+
+        if qty <= 0:
+            out["reason"] = (f"risk ${risk_quote:.2f} over a {risk_distance:g} stop "
+                             f"is below the {step} step")
+            return out
+
+        notional = qty * entry
+        out["notional"] = round(notional, 4)
+        if notional < min_notional:
+            out["reason"] = (f"notional ${notional:.2f} below the exchange "
+                             f"minimum ${min_notional:.2f}")
+            return out
+
+        out["qty"] = qty
+        out["ok"] = True
+        return out
+
+    except Exception as e:
+        out["reason"] = f"sizing error: {e}"
+        return out
+
+
 def place_order(symbol: str, signal: str, position_units: float,
-                stop_loss: float, take_profit: float, confidence: float) -> dict:
+                stop_loss: float, take_profit: float, confidence: float,
+                strategy: str = None) -> dict:
+    """
+    Open a Binance position.
+
+    `strategy` identifies the caller and is REQUIRED to be
+    `STRATEGY_SILVER_BULLET` for an order to be sent. It defaults to None, which
+    is DENIED, so a caller written before the lock existed cannot submit by
+    omission — see `modules.strategy_guard`.
+
+    The guard is here, in the function that actually sends the exchange order,
+    rather than at each caller: gating the callers would leave the next caller
+    someone adds free to submit.
+    """
+    from modules.strategy_guard import STRATEGY_SILVER_BULLET, order_source_allowed
+
+    allowed, why = order_source_allowed(strategy)
+    if not allowed:
+        print(f"[executor] order REFUSED for {symbol}: {why}")
+        return {"success": False, "error": f"entry blocked: {why}",
+                "blocked": True, "strategy": strategy}
+
     db = SessionLocal()
     try:
         from modules.market_data  import get_ticker_price, place_order_raw, set_leverage, get_balance

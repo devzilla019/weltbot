@@ -133,6 +133,27 @@ class ForexTrade(Base):
     created_at          = Column(DateTime(timezone=True), server_default=func.now())
     closed_at           = Column(DateTime(timezone=True), nullable=True)
 
+    # ── Silver Bullet trade management ────────────────────────────────────────
+    # The state below exists so a backend restart can resume a live position
+    # instead of re-deriving it from price. Without it a restart either repeats
+    # a partial close or forgets a stop that has already been trailed.
+    tp3                 = Column(Float, nullable=True)    # liquidity target
+    original_lots       = Column(Float, nullable=True)    # size at entry, before any partial
+    initial_stop        = Column(Float, nullable=True)    # stop at entry, before any move
+    initial_risk        = Column(Float, nullable=True)    # |entry - initial_stop|
+    tp1_done            = Column(Boolean, default=False)
+    tp2_done            = Column(Boolean, default=False)
+    tp3_done            = Column(Boolean, default=False)
+    breakeven_done      = Column(Boolean, default=False)
+    trailing_active     = Column(Boolean, default=False)
+    peak_price          = Column(Float, nullable=True)    # best price seen, for trailing
+    session_name        = Column(String, nullable=True)   # which window opened it
+    session_expires_at  = Column(DateTime(timezone=True), nullable=True)
+    management_state    = Column(String, nullable=True)   # JSON blob of the live state
+    close_reason        = Column(String, nullable=True)   # why it was closed
+    vp_confluence       = Column(String, nullable=True)   # POC_OVERLAP / VAH_.. / NONE
+    partial_close_pct   = Column(Float, nullable=True)    # share of the original closed so far
+
 class CRTLevel(Base):
     __tablename__ = "crt_levels"
     id              = Column(Integer, primary_key=True)

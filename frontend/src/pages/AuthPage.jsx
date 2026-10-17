@@ -37,7 +37,7 @@ export default function AuthPage(){
           <div className="auth-logo-text"><span className="w">WELT</span><span className="b">BOT</span></div>
           <div className="auth-logo-sub">Autonomous Crypto Trading · v5.1</div>
           <div style={{display:"flex",justifyContent:"center",marginTop:10}}>
-            <div style={{display:"inline-flex",gap:6,padding:"4px 14px",borderRadius:20,background:"rgba(77,159,255,0.08)",border:"1px solid rgba(77,159,255,0.2)",fontSize:10,color:"var(--info)",fontFamily:"var(--font-mono)"}}>✦ SMC · HTF Bias · Kelly Compounding</div>
+            <div style={{display:"inline-flex",gap:6,padding:"4px 14px",borderRadius:20,background:"rgba(77,159,255,0.08)",border:"1px solid rgba(77,159,255,0.2)",fontSize:10,color:"var(--info)",fontFamily:"var(--font-mono)"}}>✦ Silver Bullet · Volume Profile · Kelly Compounding</div>
           </div>
         </div>
         <div className="auth-tabs">

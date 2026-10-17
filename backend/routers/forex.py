@@ -92,8 +92,6 @@ def forex_status() -> Dict:
     """
     try:
         from config import FOREX_ENABLED, FOREX_PAIRS
-        from modules.kronos_engine import get_all_biases, is_kronos_available
-        from modules.crt_detector import get_cached_levels
         from modules.forex_position_manager import get_forex_position_summary
         
         if not FOREX_ENABLED:
@@ -102,8 +100,6 @@ def forex_status() -> Dict:
                 'message': 'Forex trading disabled'
             }
         
-        biases = get_all_biases()
-        levels = get_cached_levels()
         position_summary = get_forex_position_summary()
         
         # Capital.com account balance (separate from crypto)
@@ -113,22 +109,104 @@ def forex_status() -> Dict:
             account = get_capital_balance()
         except Exception as e:
             logger.warning(f"[forex-api] account info unavailable: {e}")
-        
+
+        # Strategy state. The Kronos biases and CRT levels this endpoint used to
+        # publish belonged to the retired stack; `silver_bullet` carries the H4
+        # bias and volume profile that replaced them, for the same symbols.
+        silver = _silver_bullet_state()
+        biases = {
+            symbol: {"h4_bias": rec.get("h4_bias"),
+                     "strength": rec.get("strength"),
+                     "bias": rec.get("h4_bias"),
+                     "price_position": rec.get("price_position"),
+                     "vp_bias": rec.get("vp_bias"),
+                     "predicted_change_pct": 0}
+            for symbol, rec in (silver.get("biases") or {}).items()
+        }
+        # The legacy key names are kept so an older frontend build keeps working,
+        # but they now carry the Silver Bullet volume profile.
+        levels = {
+            symbol: (rec.get("vp_levels") or {})
+            for symbol, rec in (silver.get("biases") or {}).items()
+        }
+
         return {
             'enabled': True,
             'provider': 'capital.com',
-            'kronos_available': is_kronos_available(),
+            'strategy': 'SILVER_BULLET',
+            'kronos_available': False,
             'pairs': FOREX_PAIRS,
             'biases': biases,
             'crt_levels': levels,
             'positions': position_summary,
             'account': account,
             'daily_risk': _forex_daily_risk(),
+            'silver_bullet': silver,
+            'session': _current_session(),
         }
         
     except Exception as e:
         logger.error(f"[forex-api] status error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/silver-bullet")
+def forex_silver_bullet() -> Dict:
+    """
+    The Silver Bullet strategy state on its own: active session, session clock,
+    per-symbol daily bias and volume-profile levels, and the pending setups.
+
+    Split out from /status so the dashboard can poll the strategy state without
+    re-fetching balances and CRT levels it already has.
+    """
+    return _silver_bullet_state()
+
+
+@router.get("/silver-bullet/setups")
+def forex_silver_bullet_setups() -> Dict:
+    """Pending Silver Bullet setups with their state, confidence and expiry."""
+    state = _silver_bullet_state()
+    return {
+        "date": state.get("date"),
+        "active_session": state.get("active_session"),
+        "pending_count": state.get("pending_count", 0),
+        "min_confidence": state.get("min_confidence"),
+        "setups": state.get("pending_setups", []),
+    }
+
+
+@router.get("/schedule")
+def forex_schedule() -> Dict:
+    """
+    The UTC schedule the scheduler is actually running.
+
+    Served from the modules that enforce it, so the dashboard cannot show a
+    schedule that differs from the one in force.
+    """
+    from modules.forex_position_manager import (EOD_HOUR, EOD_MINUTE,
+                                                EOD_NO_NEW_ENTRIES_HOUR,
+                                                next_session_times)
+    from modules.forex_signal_engine import MIN_CONFIDENCE
+
+    return {
+        "timezone": "UTC",
+        "sessions": next_session_times(),
+        "jobs": [
+            {"time": "00:01", "job": "Reset daily strategy cache"},
+            {"time": "07:00", "job": "Daily bias + volume profile"},
+            {"time": "07:55", "job": "Pre-session liquidity (London)"},
+            {"time": "08:00-09:00", "job": "London scanner, every 5 min"},
+            {"time": "14:55", "job": "Pre-session liquidity (NY morning)"},
+            {"time": "15:00-16:00", "job": "NY morning scanner, every 5 min"},
+            {"time": "18:55", "job": "Pre-session liquidity (NY afternoon)"},
+            {"time": "19:00-20:00", "job": "NY afternoon scanner, every 5 min"},
+            {"time": "every 2 min", "job": "Monitor open forex positions"},
+            {"time": f"{EOD_HOUR:02d}:{EOD_MINUTE:02d}", "job": "End-of-day position policy"},
+            {"time": "23:00", "job": "Daily report"},
+        ],
+        "no_new_entries_after_hour": EOD_NO_NEW_ENTRIES_HOUR,
+        "min_confidence": MIN_CONFIDENCE,
+    }
 
 
 @router.get("/balance")
@@ -173,52 +251,62 @@ def kronos_status() -> Dict:
 @router.get("/signals")
 def forex_signals() -> List[Dict]:
     """
-    Get active forex signals and setups
+    Active forex signals — Silver Bullet's daily bias and volume profile.
+
+    This used to read the Kronos bias and the CRT range cache. Both belonged to
+    the retired stack, so the endpoint reported a strategy that could not trade.
+    The key names are kept for frontend compatibility; the data is now Silver
+    Bullet's, and `strategy` names what is actually running.
     """
     try:
         from config import FOREX_PAIRS
-        from modules.kronos_engine import get_cached_bias
-        from modules.crt_detector import get_cached_levels
+        from modules.silver_bullet import get_daily_bias
         from modules.market_data_forex import get_current_price
-        
+
         signals = []
-        
+
         for symbol in FOREX_PAIRS:
             try:
-                bias = get_cached_bias(symbol)
-                levels_by_tf = get_cached_levels(symbol)   # {timeframe: level}
+                rec = get_daily_bias(symbol) or {}
+                vp = rec.get("vp_levels") or {}
                 price = get_current_price(symbol)
 
-                if not levels_by_tf:
+                if not vp:
                     continue
 
-                # Prefer the daily range for the headline PDH/PDL
-                daily = levels_by_tf.get('1d') or next(iter(levels_by_tf.values()))
-
-                signal = {
+                signals.append({
                     'symbol': symbol,
+                    'strategy': 'SILVER_BULLET',
                     'current_price': price,
-                    'pdh': daily.get('range_high'),
-                    'pdl': daily.get('range_low'),
-                    'timeframe': daily.get('timeframe', '1d'),
-                    'ranges': {
-                        tf: {'high': lv.get('range_high'), 'low': lv.get('range_low')}
-                        for tf, lv in levels_by_tf.items()
+                    'h4_bias': rec.get('h4_bias'),
+                    'price_position': rec.get('price_position'),
+                    'vp_bias': rec.get('vp_bias'),
+                    'vp_levels': {
+                        'poc': vp.get('poc'), 'vah': vp.get('vah'),
+                        'val': vp.get('val'),
+                        'volume_source': vp.get('volume_source'),
+                        'source_trusted': vp.get('source_trusted'),
+                        'valid': vp.get('valid'),
                     },
-                    'kronos_bias': bias.get('bias', 'NEUTRAL') if bias else 'NEUTRAL',
-                    'kronos_confidence_boost': bias.get('confidence_boost', 0) if bias else 0,
+                    'vp_gateable': rec.get('vp_gateable'),
+                    # Legacy key names, now carrying the volume profile so an
+                    # existing consumer is not left with empty fields.
+                    'pdh': vp.get('vah'),
+                    'pdl': vp.get('val'),
+                    'timeframe': '1d',
+                    'ranges': {'1d': {'high': vp.get('vah'), 'low': vp.get('val')}},
+                    'kronos_bias': rec.get('h4_bias') or 'NEUTRAL',
+                    'kronos_confidence_boost': 0,
                     'crt_status': 'WAITING',
-                    'predicted_change': bias.get('predicted_change_pct', 0) if bias else 0
-                }
-
-                signals.append(signal)
+                    'predicted_change': 0,
+                })
 
             except Exception as e:
                 logger.error(f"[forex-api] signal error {symbol}: {e}")
                 continue
-        
+
         return signals
-        
+
     except Exception as e:
         logger.error(f"[forex-api] signals error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -231,12 +319,40 @@ def forex_positions() -> Dict:
     """
     try:
         from modules.forex_position_manager import get_forex_position_summary
-        
-        return get_forex_position_summary()
-        
+
+        summary = get_forex_position_summary()
+
+        # Silver Bullet context the positions panel needs: which window is open,
+        # how many setups are queued behind it, and today's halt state. These are
+        # additive keys, so an existing consumer is unaffected.
+        try:
+            from modules.forex_position_manager import daily_halt_active
+            state = _silver_bullet_state()
+            halted, halt_reason = daily_halt_active()
+            summary["active_session"] = state.get("active_session")
+            summary["pending_setups"] = state.get("pending_count", 0)
+            summary["daily_halt"] = halted
+            summary["daily_halt_reason"] = halt_reason
+        except Exception as e:
+            logger.warning(f"[forex-api] position context unavailable: {e}")
+
+        return summary
+
     except Exception as e:
         logger.error(f"[forex-api] positions error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/daily-report")
+def forex_daily_report() -> Dict:
+    """
+    The day's forex trading summary.
+
+    Read-only and computed on demand, so the dashboard can show it before the
+    23:00 job has run.
+    """
+    from modules.forex_position_manager import build_daily_report
+    return build_daily_report()
 
 
 @router.get("/trades")
@@ -425,22 +541,35 @@ def cascade_stats() -> Dict:
 @router.post("/update-bias/{symbol}")
 def update_kronos_bias(symbol: str) -> Dict:
     """
-    Manually trigger Kronos bias update for a symbol
+    Manually refresh a symbol's Silver Bullet daily bias and volume profile.
+
+    This used to run the Kronos model. Kronos was the bias layer of the retired
+    stack and nothing in the live path consults it, so running it would spend
+    GPU time producing a number no decision reads. The route and name are kept
+    so an existing caller keeps working; the work it does is now the live
+    strategy's.
     """
     try:
-        from modules.market_data_forex import get_candles
-        from modules.kronos_engine import predict_bias
-        
-        df = get_candles(symbol, timeframe='1h', limit=400)
-        if df is None:
-            raise HTTPException(status_code=400, detail="Failed to fetch candles")
-        
-        bias = predict_bias(symbol, df)
-        if bias is None:
-            raise HTTPException(status_code=500, detail="Kronos prediction failed")
-        
-        return bias
-        
+        from modules.silver_bullet import calculate_daily_bias
+
+        record = calculate_daily_bias(symbol)
+        if not record:
+            raise HTTPException(status_code=500,
+                                detail="Daily bias calculation failed")
+
+        vp = record.get("vp_levels") or {}
+        return {
+            "symbol": symbol,
+            "strategy": "SILVER_BULLET",
+            "h4_bias": record.get("h4_bias"),
+            "strength": record.get("strength"),
+            "price_position": record.get("price_position"),
+            "vp_levels": {"poc": vp.get("poc"), "vah": vp.get("vah"),
+                          "val": vp.get("val")} if vp else None,
+            "vp_gateable": record.get("vp_gateable"),
+            "session_date": record.get("session_date"),
+        }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -451,47 +580,49 @@ def update_kronos_bias(symbol: str) -> Dict:
 @router.post("/update-crt/{symbol}")
 def update_crt_levels(symbol: str) -> Dict:
     """
-    Manually trigger a multi-timeframe CRT range update for a symbol.
+    Manually trigger a strategy refresh for a symbol.
+
+    This used to recompute the retired CRT ranges. It now refreshes the Silver
+    Bullet daily bias and previous-day volume profile, which is what the
+    dashboard displays. The route and its name are kept so an existing caller
+    keeps working, but the data it returns is the live strategy's.
     """
     try:
-        from modules.market_data_forex import get_candles
-        from modules.crt_detector import calculate_range, CRT_TIMEFRAMES
+        from modules.silver_bullet import calculate_daily_bias
 
-        out = {}
-        for tf in CRT_TIMEFRAMES:
-            candles = get_candles(symbol, timeframe=tf, limit=60)
-            if candles is None or len(candles) < 2:
-                continue
-            level = calculate_range(symbol, candles, timeframe=tf)
-            if level:
-                out[tf] = level
+        record = calculate_daily_bias(symbol)
+        if not record:
+            raise HTTPException(status_code=500,
+                                detail="Daily bias calculation failed")
 
-        if not out:
-            raise HTTPException(status_code=500, detail="CRT range calculation failed")
-
-        return {"symbol": symbol, "ranges": out}
+        vp = record.get("vp_levels") or {}
+        return {
+            "symbol": symbol,
+            "strategy": "SILVER_BULLET",
+            "h4_bias": record.get("h4_bias"),
+            "strength": record.get("strength"),
+            "vp_levels": {"poc": vp.get("poc"), "vah": vp.get("vah"),
+                          "val": vp.get("val")} if vp else None,
+            "vp_gateable": record.get("vp_gateable"),
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[forex-api] crt update error {symbol}: {e}")
+        logger.error(f"[forex-api] strategy update error {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/pair/{symbol}")
 def forex_pair_detail(symbol: str) -> Dict:
     """
-    Get detailed info for a specific forex pair
+    Detailed Silver Bullet state for one pair.
     """
     try:
-        from modules.kronos_engine import get_cached_bias
-        from modules.crt_detector import get_cached_levels
         from modules.market_data_forex import get_current_price
         from database import SessionLocal
         from models import ForexTrade
         
-        bias = get_cached_bias(symbol)
-        levels = get_cached_levels(symbol)
         price = get_current_price(symbol)
         
         db = SessionLocal()
@@ -508,55 +639,71 @@ def forex_pair_detail(symbol: str) -> Dict:
         finally:
             db.close()
         
-        # levels is {timeframe: level}; expose the daily one as the headline
-        daily = levels.get('1d') if isinstance(levels, dict) else None
-        if daily is None and isinstance(levels, dict) and levels:
-            daily = next(iter(levels.values()))
-
-        # Active CRT setup (if any) — shows the trend, CRT status and entry type
-        active_setup = None
+        # ── Silver Bullet state for this pair ────────────────────────────────
+        # The CRT `active_setup` block that used to sit above this read the
+        # retired CRT range cache and labelled the card "ENTRY TRIGGERED". Both
+        # are gone: the only setup the application can act on is a Silver
+        # Bullet one, and `silver_bullet.setup` below is it.
+        silver = None
         try:
-            from main import _forex_active_setups
-            s = _forex_active_setups.get(symbol)
-            if s:
-                poi = s.get('poi')
-                if isinstance(poi, dict):
-                    poi = poi.get('kind')
-                trend = s.get('trend_direction')
-                if trend in ('BULLISH', 'BEARISH'):
-                    if poi or s.get('poi_status') == 'confirmed':
-                        crt_status = 'ENTRY TRIGGERED'
-                    elif s.get('sweep_type'):
-                        crt_status = 'SWEEP CONFIRMED'
-                    else:
-                        crt_status = 'RANGE IDENTIFIED'
-                else:
-                    crt_status = 'WAITING'
+            from modules.silver_bullet import (get_active_setups, get_daily_bias,
+                                               get_session_levels)
+            from modules.forex_signal_engine import MIN_CONFIDENCE, current_session
 
-                active_setup = {
-                    'timeframe': s.get('timeframe'),
-                    'sweep_type': s.get('sweep_type'),
-                    'direction': s.get('direction'),
-                    'trend_direction': trend or 'NEUTRAL',
-                    'crt_status': crt_status,
-                    'target': s.get('target'),
-                    'confirm_timeframe': s.get('confirm_timeframe'),
-                    'entry_timeframe': s.get('entry_timeframe'),
-                    'poi': poi,
-                    'poi_status': s.get('poi_status', 'waiting'),
-                    'session': _current_session(),
-                }
-        except Exception:
-            pass
+            rec = get_daily_bias(symbol) or {}
+            vp = rec.get("vp_levels") or {}
+            setup = get_active_setups().get(symbol)
+            levels_sb = None
+            active = current_session()
+            if active:
+                levels_sb = get_session_levels(symbol, active)
+
+            silver = {
+                "h4_bias": rec.get("h4_bias"),
+                "strength": rec.get("strength"),
+                "price_position": rec.get("price_position"),
+                "vp_bias": rec.get("vp_bias"),
+                "ema50": rec.get("ema50"),
+                "vp_levels": {
+                    "poc": vp.get("poc"), "vah": vp.get("vah"), "val": vp.get("val"),
+                    "volume_source": vp.get("volume_source"),
+                    "source_trusted": vp.get("source_trusted"),
+                    "valid": vp.get("valid"), "warning": vp.get("warning"),
+                } if vp else None,
+                "vp_gateable": rec.get("vp_gateable"),
+                "vp_gate_reason": rec.get("vp_gate_reason"),
+                "min_confidence": MIN_CONFIDENCE,
+                "session_levels": levels_sb,
+                "setup": {
+                    "state": setup.get("state"),
+                    "direction": setup.get("direction"),
+                    "session": setup.get("session"),
+                    "confidence": setup.get("confidence"),
+                    "executable": bool(setup.get("executable")),
+                    "entry_taken": bool(setup.get("entry_taken")),
+                    "reject_reason": setup.get("reject_reason"),
+                    "fvg_low": (setup.get("fvg") or {}).get("fvg_low"),
+                    "fvg_high": (setup.get("fvg") or {}).get("fvg_high"),
+                    "sweep_wick": (setup.get("sweep") or {}).get("sweep_wick"),
+                    "vp_confluence": setup.get("vp_confluence"),
+                    "expires_at": setup.get("expires_at"),
+                } if setup else None,
+            }
+        except Exception as e:
+            logger.warning(f"[forex-api] silver bullet detail unavailable {symbol}: {e}")
 
         return {
             'symbol': symbol,
             'current_price': price,
-            'kronos_bias': bias,
-            'crt_levels': daily,
-            'crt_ranges': levels,
-            'active_setup': active_setup,
+            'strategy': 'SILVER_BULLET',
+            # Legacy key names, now carrying the Silver Bullet volume profile so
+            # an older frontend build still finds its fields.
+            'kronos_bias': (silver or {}).get('h4_bias'),
+            'crt_levels': (silver or {}).get('vp_levels'),
+            'crt_ranges': {},
+            'active_setup': (silver or {}).get('setup'),
             'session': _current_session(),
+            'silver_bullet': silver,
             'open_trade': {
                 'id': open_trade.id,
                 'signal': open_trade.signal,
@@ -565,9 +712,19 @@ def forex_pair_detail(symbol: str) -> Dict:
                 'tp': open_trade.take_profit,
                 'tp1': open_trade.tp1,
                 'tp2': open_trade.tp2,
+                'tp3': open_trade.tp3,
                 'entry_type': open_trade.entry_type,
                 'partial_tp_hit': bool(open_trade.partial_tp_hit),
+                'partial_close_pct': open_trade.partial_close_pct,
+                'tp1_done': bool(open_trade.tp1_done),
+                'tp2_done': bool(open_trade.tp2_done),
+                'tp3_done': bool(open_trade.tp3_done),
+                'breakeven_done': bool(open_trade.breakeven_done),
+                'trailing_active': bool(open_trade.trailing_active),
+                'session': open_trade.session_name,
+                'vp_confluence': open_trade.vp_confluence,
                 'lots': open_trade.lots,
+                'original_lots': open_trade.original_lots,
                 'confidence': open_trade.confidence
             } if open_trade else None,
             'recent_trades_count': len(recent_trades),
@@ -581,10 +738,126 @@ def forex_pair_detail(symbol: str) -> Dict:
 
 
 def _current_session() -> str:
-    """Trading session label for the current UTC hour."""
-    hour = datetime.utcnow().hour
-    if 12 <= hour < 15:
-        return 'NY'
-    if 7 <= hour < 12:
-        return 'LONDON'
-    return 'ASIA'
+    """
+    Trading session label for the current UTC hour.
+
+    Delegates to the engine's own session table. This used to hold a SECOND,
+    different definition ('NY' for 12-15, 'LONDON' for 7-12, else 'ASIA'), which
+    disagreed with the windows the scanner actually enforces: the API could
+    report 'LONDON' while the engine reported no session, or 'ASIA' during the
+    19:00-20:00 window the engine calls NY_AFTERNOON. A dashboard that
+    contradicts the scanner is worse than no dashboard.
+
+    Returns the engine's session name, or 'CLOSED' when no window is open.
+    """
+    from modules.forex_signal_engine import current_session
+    return current_session() or "CLOSED"
+
+
+def _legacy_entries_enabled() -> bool:
+    """
+    Whether the legacy CRT/SMC path may submit orders. Fails closed.
+
+    Exposed so the API can tell the dashboard that a CRT setup is data-only
+    rather than tradeable.
+    """
+    try:
+        from modules.forex_executor import legacy_entries_enabled
+        return legacy_entries_enabled()
+    except Exception:
+        return False
+
+
+def _silver_bullet_state() -> Dict:
+    """
+    Today's Silver Bullet state for the dashboard: session clock, daily bias with
+    its volume-profile levels, and the pending setups.
+
+    Every value comes from the modules that enforce the strategy. Nothing is
+    recomputed here, so what the dashboard shows is what the scanner decided.
+    """
+    try:
+        from modules.forex_signal_engine import (MIN_CONFIDENCE, current_session,
+                                                 session_bounds,
+                                                 session_time_remaining)
+        from modules.silver_bullet import (get_active_setups, get_all_daily_bias,
+                                           get_session_levels, utc_date_key)
+
+        now = datetime.utcnow()
+        active = current_session(now)
+        biases = get_all_daily_bias(now)
+
+        # ── Bias + volume profile per symbol ─────────────────────────────────
+        bias_rows = {}
+        for symbol, rec in biases.items():
+            vp = rec.get("vp_levels") or {}
+            bias_rows[symbol] = {
+                "h4_bias": rec.get("h4_bias"),
+                "strength": rec.get("strength"),
+                "price_position": rec.get("price_position"),
+                "vp_bias": rec.get("vp_bias"),
+                "h4_close": rec.get("h4_close"),
+                "ema50": rec.get("ema50"),
+                "session_date": rec.get("session_date"),
+                "vp_levels": {
+                    "poc": vp.get("poc"), "vah": vp.get("vah"),
+                    "val": vp.get("val"),
+                    "volume_source": vp.get("volume_source"),
+                    "source_trusted": vp.get("source_trusted"),
+                    "valid": vp.get("valid"),
+                    "warning": vp.get("warning"),
+                } if vp else None,
+                "vp_gateable": rec.get("vp_gateable"),
+                "vp_gate_reason": rec.get("vp_gate_reason"),
+            }
+
+        # ── Pending setups ───────────────────────────────────────────────────
+        pending = []
+        for symbol, setup in get_active_setups().items():
+            pending.append({
+                "symbol": symbol,
+                "state": setup.get("state"),
+                "direction": setup.get("direction"),
+                "session": setup.get("session"),
+                "confidence": setup.get("confidence"),
+                "executable": bool(setup.get("executable")),
+                "entry_taken": bool(setup.get("entry_taken")),
+                "fvg_low": (setup.get("fvg") or {}).get("fvg_low"),
+                "fvg_high": (setup.get("fvg") or {}).get("fvg_high"),
+                "sweep_wick": (setup.get("sweep") or {}).get("sweep_wick"),
+                "vp_confluence": setup.get("vp_confluence"),
+                "vp_source": setup.get("vp_source"),
+                "vp_gateable": setup.get("vp_gateable"),
+                "bias": setup.get("bias"),
+                "expires_at": setup.get("expires_at"),
+                "created_at": setup.get("created_at"),
+            })
+        pending.sort(key=lambda s: -(s.get("confidence") or 0))
+
+        # ── Session clock ────────────────────────────────────────────────────
+        windows = {}
+        for name in ("LONDON", "NY_MORNING", "NY_AFTERNOON"):
+            open_dt, close_dt = session_bounds(name, now)
+            windows[name] = {
+                "open_utc": open_dt.strftime("%H:%M"),
+                "close_utc": close_dt.strftime("%H:%M"),
+                "is_open": name == active,
+                "opens_in_minutes": round((open_dt - now).total_seconds() / 60.0, 1),
+            }
+
+        return {
+            "date": utc_date_key(now),
+            "active_session": active or "CLOSED",
+            "time_remaining_seconds": session_time_remaining(active, now) if active else 0,
+            "sessions": windows,
+            "min_confidence": MIN_CONFIDENCE,
+            "biases": bias_rows,
+            "pending_setups": pending,
+            "pending_count": len(pending),
+            "symbols_with_bias": len(bias_rows),
+        }
+
+    except Exception as e:
+        logger.error(f"[forex-api] silver bullet state error: {e}")
+        return {"error": str(e), "active_session": "UNKNOWN",
+                "pending_setups": [], "biases": {}, "pending_count": 0}

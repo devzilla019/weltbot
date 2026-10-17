@@ -1,12 +1,18 @@
+"""
+backend/routers/signals.py
+Cached signal payloads.
+
+The signal CACHE is retained (the dashboard reads it), but nothing computes new
+entries from it any more. `compute_signal` belonged to the retired SMC engine,
+so the read endpoints now serve whatever is already cached and the execute
+endpoint refuses — see `execute_signal`.
+"""
 import json
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from database import get_db
 from models import SignalAccuracy, SignalCache, Trade
-from modules.signal_engine   import compute_signal
-from modules.risk_manager    import calculate_risk
-from config import MIN_CONFIDENCE
 
 router = APIRouter(prefix="/api/signals", tags=["signals"])
 
@@ -19,18 +25,29 @@ def _get_bias(db, symbol):
 
 
 def _build_payload(symbol, balance=10.0):
-    sig = compute_signal(symbol)
-    if "error" in sig:
+    """
+    The cached payload for `symbol`, or None.
+
+    This used to CALL the retired SMC engine to compute a fresh signal, which
+    meant a read-only endpoint could produce a tradeable recommendation from an
+    engine that can no longer trade. It now returns only what is already cached;
+    the Silver Bullet state is served from /api/forex/silver-bullet and
+    /api/crypto/strategy.
+    """
+    try:
+        from database import SessionLocal
+        from models import SignalCache
+
+        db = SessionLocal()
+        try:
+            row = db.query(SignalCache).filter(SignalCache.symbol == symbol).first()
+            if not row:
+                return None
+            return json.loads(row.payload)
+        finally:
+            db.close()
+    except Exception:
         return None
-    atr  = sig["market"].get("atr", 0)
-    risk = calculate_risk(
-        sig["market"]["price"],
-        sig["signal"],
-        sig["confidence"],
-        atr,
-        balance,
-    )
-    return {"signal_data": sig, "risk_plan": risk}
 
 
 @router.get("/")
@@ -56,35 +73,17 @@ def get_signal(symbol: str, db: Session = Depends(get_db)):
 
 @router.post("/{symbol:path}/execute")
 def execute_signal(symbol: str, db: Session = Depends(get_db)):
-    symbol  = symbol.replace("-", "/")
-    cutoff  = datetime.utcnow() - timedelta(hours=4)
-    recent  = db.query(Trade).filter(
-        Trade.asset      == symbol,
-        Trade.created_at >= cutoff,
-        Trade.outcome    == "OPEN",
-    ).first()
-    if recent:
-        return {"message": f"Cooldown active for {symbol}"}
-    payload = _build_payload(symbol)
-    if not payload:
-        return {"error": "Could not compute signal"}
-    sig  = payload["signal_data"]
-    risk = payload["risk_plan"]
-    if sig["signal"] == "HOLD":
-        return {"message": "HOLD — no trade"}
+    """
+    Execute a cached crypto signal — RETIRED as an order source.
 
-    from main import guard_order
-    blocked = guard_order(symbol, "crypto")
-    if blocked:
-        return blocked
+    This endpoint used the SMC signal engine to place a Binance order, which is
+    no longer the strategy. It is kept as a route so an existing caller gets an
+    explicit, logged refusal instead of a 404 that looks like a bug, but it
+    never reaches the exchange.
 
-    from modules.executor import place_order
-    result = place_order(
-        symbol         = symbol,
-        signal         = sig["signal"],
-        position_units = risk["position_size_units"],
-        stop_loss      = risk["stop_loss"],
-        take_profit    = risk["take_profit"],
-        confidence     = sig["confidence"],
-    )
-    return result
+    `place_order` would refuse anyway (the shared strategy guard denies an
+    unidentifiable source), so this is defence in depth rather than the only
+    barrier.
+    """
+    from modules.strategy_guard import STRATEGY_LEGACY_SMC, refuse_order
+    return refuse_order(STRATEGY_LEGACY_SMC, symbol=symbol, venue="signals-api")

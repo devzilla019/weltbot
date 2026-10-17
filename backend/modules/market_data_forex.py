@@ -338,7 +338,15 @@ class CapitalSession:
             logger.error(f"[capital] POST {path} error: {e}")
             return None
 
-    def delete(self, path: str) -> Optional[requests.Response]:
+    def delete(self, path: str, body: Optional[dict] = None) -> Optional[requests.Response]:
+        """
+        DELETE, optionally with a JSON body.
+
+        Capital.com closes a position in FULL with a bare DELETE, and closes it
+        PARTIALLY when the DELETE carries `{"size": n}`. Without the body a
+        "partial" close silently becomes a full one, which is why the caller
+        must be explicit about which it wants.
+        """
         global _last_error
         if not self._pace():
             _last_error = f"rate-limit pause active ({self.rate_limit_remaining():.0f}s)"
@@ -347,10 +355,13 @@ class CapitalSession:
             return None
         from config import CAPITAL_BASE_URL
         try:
-            resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(), timeout=20)
+            kwargs = {"headers": self._auth_headers(), "timeout": 20}
+            if body is not None:
+                kwargs["json"] = body
+            resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", **kwargs)
             if resp.status_code == 401:
                 if self.login():
-                    resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(), timeout=20)
+                    resp = requests.delete(f"{CAPITAL_BASE_URL}{path}", **kwargs)
             if resp.status_code == 429:
                 self._note_rate_limit()
                 _last_error = f"HTTP 429: {resp.text[:200]}"
@@ -365,6 +376,46 @@ class CapitalSession:
         except Exception as e:
             _last_error = str(e)
             logger.error(f"[capital] DELETE {path} error: {e}")
+            return None
+
+    def put(self, path: str, body: dict) -> Optional[requests.Response]:
+        """
+        PUT, used to amend a live position's stop and/or target.
+
+        Capital.com amends a position in place via
+        `PUT /api/v1/positions/{dealId}`. There is no "modify order" for an
+        already-filled position, so this is the only way to move a stop —
+        and moving a stop is the only way to implement breakeven or trailing
+        without closing and reopening the position.
+        """
+        global _last_error
+        if not self._pace():
+            _last_error = f"rate-limit pause active ({self.rate_limit_remaining():.0f}s)"
+            return None
+        if not self._ensure_session():
+            return None
+        from config import CAPITAL_BASE_URL
+        try:
+            resp = requests.put(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                json=body, timeout=20)
+            if resp.status_code == 401:
+                if self.login():
+                    resp = requests.put(f"{CAPITAL_BASE_URL}{path}", headers=self._auth_headers(),
+                                        json=body, timeout=20)
+            if resp.status_code == 429:
+                self._note_rate_limit()
+                _last_error = f"HTTP 429: {resp.text[:200]}"
+                return None
+            if resp.status_code not in (200, 201):
+                _last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error(f"[capital] PUT {path}: {_last_error}")
+                return None
+            self._note_success()
+            _last_error = None
+            return resp
+        except Exception as e:
+            _last_error = str(e)
+            logger.error(f"[capital] PUT {path} error: {e}")
             return None
 
 
@@ -489,7 +540,17 @@ def session_status() -> Dict:
 def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optional[pd.DataFrame]:
     """
     Fetch OHLCV candles from Capital.com.
-    Returns DataFrame: timestamp, open, high, low, close, volume
+
+    Returns DataFrame: timestamp, open, high, low, close, volume, in ascending
+    timestamp order, plus a `volume_source` attribute describing what `volume`
+    actually contains.
+
+    The volume column is Capital.com's `lastTradedVolume`, which is the number
+    of contracts the provider itself cleared in that candle. For an FX or CFD
+    instrument that is a small slice of a decentralised market, so it is a
+    PROXY for traded volume and never true exchange-traded volume. Callers that
+    gate decisions on volume must therefore check `df.attrs["volume_source"]`
+    rather than assuming the column is meaningful.
     """
     epic = resolve_epic(symbol)
     resolution = _RES_MAP.get(timeframe, "HOUR")
@@ -520,15 +581,19 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
             return _num(node)
 
         rows = []
+        saw_real_volume = False
         for p in prices:
             try:
+                vol = _num(p.get("lastTradedVolume"), 0.0)
+                if vol > 0:
+                    saw_real_volume = True
                 rows.append({
                     "timestamp": p["snapshotTime"],
                     "open":  _mid(p.get("openPrice")),
                     "high":  _mid(p.get("highPrice")),
                     "low":   _mid(p.get("lowPrice")),
                     "close": _mid(p.get("closePrice")),
-                    "volume": 0,
+                    "volume": vol,
                 })
             except (KeyError, TypeError, ValueError):
                 continue
@@ -539,8 +604,9 @@ def get_candles(symbol: str, timeframe: str = "1h", limit: int = 400) -> Optiona
         df = pd.DataFrame(rows)
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        df.attrs["volume_source"] = "tick" if saw_real_volume else "none"
         _cache_put(_candle_cache, cache_key, df)
-        return df
+        return df.copy()
 
     except Exception as e:
         logger.error(f"[capital] candle parse error {epic}: {e}")
@@ -815,17 +881,25 @@ def place_order(symbol: str, signal: str, size: float, sl: float, tp: float) -> 
 
 # ── Close position ────────────────────────────────────────────────────────────
 
-def close_position(deal_id: str) -> Dict:
+def close_position(deal_id: str, size: Optional[float] = None) -> Dict:
     """
-    Close an open position by dealId.
+    Close an open position by dealId, in full or in part.
 
-    Reads the position first so the realised P&L can be returned to the
-    caller — the dashboard shows it immediately after a manual close.
-    Returns {success, pnl, symbol, size, error}.
+    `size=None` closes the whole position. Passing `size` closes that many units
+    and leaves the rest running — Capital.com does this with a DELETE carrying a
+    size body.
+
+    Partial closes are a SINGLE broker call, which is what makes them safe to
+    retry. The alternative (close everything, reopen the remainder) leaves the
+    position fully closed if the reopen fails, and it briefly holds no position
+    at all, so a crash between the two calls silently removes the trade.
+
+    Reads the position first so the realised P&L can be returned to the caller.
+    Returns {success, pnl, symbol, size, remaining, partial, error}.
     """
     pnl = 0.0
     symbol = None
-    size = None
+    held = None
 
     try:
         positions = get_open_positions()
@@ -834,12 +908,30 @@ def close_position(deal_id: str) -> Dict:
                 if str(p.get("id")) == str(deal_id):
                     pnl = float(p.get("unrealized_pnl") or 0.0)
                     symbol = p.get("symbol")
-                    size = p.get("size")
+                    held = p.get("size")
                     break
     except Exception as e:
         logger.warning(f"[capital] could not read P&L before close: {e}")
 
-    resp = _session.delete(f"/api/v1/positions/{deal_id}")
+    partial = size is not None
+
+    if partial:
+        # A partial close must ask for strictly less than the position holds,
+        # otherwise it is a full close wearing a partial close's label and the
+        # remaining-size bookkeeping downstream would be wrong.
+        if held is not None and float(size) >= float(held):
+            logger.info(f"[capital] partial close of {size} >= held {held} for "
+                        f"{deal_id} — sending as a full close")
+            size = None
+            partial = False
+
+    if partial and (size is None or float(size) <= 0):
+        return {"success": False, "error": "invalid partial close size"}
+
+    resp = _session.delete(
+        f"/api/v1/positions/{deal_id}",
+        body={"size": float(size)} if partial else None,
+    )
     if resp is None:
         return {"success": False, "error": _last_error or "close request failed"}
 
@@ -848,8 +940,50 @@ def close_position(deal_id: str) -> Dict:
         _positions_cache.clear()
         _balance_cache.clear()
 
-    logger.info(f"[capital] position closed — dealId={deal_id} pnl=${pnl:.2f}")
-    return {"success": True, "pnl": round(pnl, 2), "symbol": symbol, "size": size}
+    remaining = None
+    if partial and held is not None:
+        remaining = round(float(held) - float(size), 6)
+
+    logger.info(f"[capital] position {'partially ' if partial else ''}closed — "
+                f"dealId={deal_id} size={size if partial else held} "
+                f"remaining={remaining} pnl=${pnl:.2f}")
+    return {"success": True, "pnl": round(pnl, 2), "symbol": symbol,
+            "size": size if partial else held, "remaining": remaining,
+            "partial": partial}
+
+
+def amend_position(deal_id: str, sl: Optional[float] = None,
+                   tp: Optional[float] = None) -> Dict:
+    """
+    Move a live position's stop and/or target without closing it.
+
+    Capital.com amends in place via `PUT /api/v1/positions/{dealId}`. Only the
+    levels passed are sent, so amending the stop does not disturb the target.
+
+    This is what makes breakeven and trailing possible: the previous approach
+    closed the position and reopened it at the new stop, which realises P&L,
+    loses the original entry, and can fail halfway.
+    """
+    if sl is None and tp is None:
+        return {"success": False, "error": "nothing to amend"}
+
+    body: Dict = {}
+    if sl is not None:
+        body["stopLevel"] = round(float(sl), 5)
+    if tp is not None:
+        body["profitLevel"] = round(float(tp), 5)
+
+    resp = _session.put(f"/api/v1/positions/{deal_id}", body)
+    if resp is None:
+        return {"success": False, "error": _last_error or "amend request failed"}
+
+    with _cache_lock:
+        _positions_cache.clear()
+
+    logger.info(f"[capital] position amended — dealId={deal_id} "
+                f"SL={body.get('stopLevel')} TP={body.get('profitLevel')}")
+    return {"success": True, "deal_id": deal_id,
+            "stop_loss": body.get("stopLevel"), "take_profit": body.get("profitLevel")}
 
 
 # ── Compatibility shims ───────────────────────────────────────────────────────

@@ -357,19 +357,30 @@ def evaluate_symbol(payload: dict):
             from modules.forex_position_manager import can_open_forex_trade
             allowed, reason = can_open_forex_trade(symbol)
         else:
-            from modules.signal_engine import scan_btc_eth_crt, crt_min_confidence
-            setup = scan_btc_eth_crt(symbol)
-            floor = crt_min_confidence()
-            if setup and setup.get("direct_signal"):
-                conf = setup["direct_signal"].get("confidence")
-                if conf is not None and conf < floor:
-                    allowed, reason = False, f"confidence {conf:.1f}% < {floor:.0f}%"
-                else:
-                    allowed, reason = True, f"CRT entry live (floor {floor:.0f}%)"
-            elif setup:
-                allowed, reason = False, "CRT setup found, entry trigger not live"
+            # Dry evaluation against the ONE live strategy. This used to run the
+            # retired crypto CRT scan, which would report a verdict from an
+            # engine that can no longer trade — a diagnostic that contradicts
+            # the runtime is worse than no diagnostic.
+            from modules.silver_bullet import get_daily_bias
+            from modules.forex_signal_engine import MIN_CONFIDENCE, current_session
+
+            session = current_session()
+            if not session:
+                allowed, reason = False, "outside the Silver Bullet session windows"
             else:
-                allowed, reason = False, "no CRT setup"
+                bias = get_daily_bias(symbol)
+                if not bias:
+                    allowed, reason = False, "no daily bias computed for today"
+                elif bias.get("h4_bias") == "NEUTRAL":
+                    allowed, reason = False, "H4 bias is NEUTRAL — no trade today"
+                elif not bias.get("vp_gateable"):
+                    allowed, reason = False, (
+                        f"volume profile not gateable: "
+                        f"{bias.get('vp_gate_reason') or 'unavailable'}")
+                else:
+                    allowed, reason = True, (
+                        f"Silver Bullet armed in {session}, H4 "
+                        f"{bias['h4_bias']} (floor {MIN_CONFIDENCE})")
     except Exception as e:
         allowed, reason = False, f"evaluation error: {e}"
 

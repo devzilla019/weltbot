@@ -7,10 +7,10 @@ import{useState,useEffect}from"react";
  */
 const STEPS=[
   "Initializing WeltBot core…",
-  "Loading Kronos AI engine…",
+  "Loading market data adapters…",
   "Connecting to Binance…",
   "Linking Capital.com…",
-  "Calibrating CRT + SMC layers…",
+  "Calibrating Silver Bullet sessions…",
   "Syncing market data…",
   "Ready.",
 ];

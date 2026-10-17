@@ -45,6 +45,11 @@ export const forexApi = {
   kronosStatus:   ()     => req("GET",  "/api/forex/kronos-status"),
   cascadeStats:   ()     => req("GET",  "/api/forex/cascade-stats"),
   dailyRisk:      ()     => req("GET",  "/api/forex/daily-risk"),
+  // Silver Bullet strategy state
+  silverBullet:   ()     => req("GET",  "/api/forex/silver-bullet"),
+  setups:         ()     => req("GET",  "/api/forex/silver-bullet/setups"),
+  schedule:       ()     => req("GET",  "/api/forex/schedule"),
+  dailyReport:    ()     => req("GET",  "/api/forex/daily-report"),
   closeTrade:     (id)   => req("POST", `/api/forex/trade/${id}/close`),
   closeAll:       ()     => req("POST", "/api/forex/close-all"),
   clearTrades:    ()     => req("DELETE","/api/forex/trades/clear"),

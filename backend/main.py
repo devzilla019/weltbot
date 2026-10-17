@@ -12,7 +12,16 @@ from routers import signals, trades, analytics, forex, crypto_strategy
 # from routers import auth
 from config import MAX_OPEN_TRADES, SCAN_INTERVAL_MIN, BINANCE_TESTNET, DAILY_DRAWDOWN_LIMIT
 from datetime import datetime
+from typing import Dict, Optional
 import json, logging, os, sys, threading
+
+# The strategy's session table and the end-of-day clock come from the modules
+# that ENFORCE them, so the schedule cannot drift from the rules. A second copy
+# of the hours here is how a scanner ends up running outside its window.
+from modules.forex_signal_engine import SESSIONS
+from modules.forex_position_manager import EOD_HOUR, EOD_MINUTE, EOD_NO_NEW_ENTRIES_HOUR
+from modules.forex_executor import (STRATEGY_LEGACY_CRT, STRATEGY_SILVER_BULLET,
+                                    legacy_entries_enabled as _legacy_entries_enabled)
 
 # Without this, every logger.info()/logger.warning() call in the modules is
 # silently discarded — uvicorn only configures its own loggers, so the CRT
@@ -316,7 +325,13 @@ def level2_entry_check():
         # offline for the rest of the day even though it was unaffected.
         # The dashboard's crypto limit is the value that actually applies —
         # daily_drawdown_check() only ever reads the crypto Trade table.
-        crypto_limit = float(rs.get("crypto_daily_loss_limit", DAILY_LOSS_LIMIT))
+        # PRE-EXISTING DEFECT, corrected here: this referenced `DAILY_LOSS_LIMIT`,
+        # which is not defined in main.py or config (the config name is
+        # `DAILY_DRAWDOWN_LIMIT`). It would have raised NameError the first time
+        # a crypto setup reached this line. The function is retired and
+        # unreachable, so nothing changed in behaviour — but leaving a latent
+        # crash in the file is a trap for whoever re-enables it.
+        crypto_limit = float(rs.get("crypto_daily_loss_limit", DAILY_DRAWDOWN_LIMIT))
         if rs.get("crypto_daily_limit_enabled", True) and daily_drawdown_check(crypto_limit):
             print(f"[L2] crypto daily drawdown limit hit ({crypto_limit*100:.1f}%) "
                   f"— skipping crypto entries (forex unaffected)")
@@ -425,11 +440,22 @@ def run_kronos_bias_update():
 
 
 def run_crt_scan():
-    """Refined CRT scan — H4 trend, H1 pullback range, sweep confirmation."""
+    """
+    Refined CRT scan — H4 trend, H1 pullback range, sweep confirmation.
+
+    DATA-ONLY during the Silver Bullet migration. It still discovers setups and
+    still refreshes the CRT levels the dashboard reads, but the setups it finds
+    are NOT armed for entry: `run_forex_entry_check` refuses to submit them, and
+    `place_forex_order` refuses at the chokepoint. Arming them here would put
+    tradeable-looking setups on the dashboard that can never be filled.
+    """
     global _forex_active_setups
     from config import FOREX_ENABLED
     if not FOREX_ENABLED:
         return
+
+    from modules.forex_executor import legacy_entries_enabled
+    legacy_live = legacy_entries_enabled()
 
     lock = _job_locks["forex_crt"]
     if not lock.acquire(blocking=False):
@@ -475,10 +501,16 @@ def run_crt_scan():
                 sweep["poi"] = None
                 sweep["poi_status"] = "waiting"
 
-                _forex_active_setups[symbol] = sweep
                 store_crt_level(sweep)
-                print(f"[crt] {symbol} {sweep['trend_direction']} setup confirmed — "
-                      f"{sweep['direction']} target={sweep['target']:.5f}")
+                if legacy_live:
+                    _forex_active_setups[symbol] = sweep
+                    print(f"[crt] {symbol} {sweep['trend_direction']} setup confirmed — "
+                          f"{sweep['direction']} target={sweep['target']:.5f}")
+                else:
+                    # Levels refreshed for the dashboard; setup deliberately not
+                    # armed, because nothing will fill it.
+                    print(f"[crt] {symbol} {sweep['trend_direction']} setup found "
+                          f"(data only — legacy entries disabled)")
 
             except Exception as e:
                 print(f"[crt] error {symbol}: {e}")
@@ -492,100 +524,196 @@ def run_crt_scan():
 
 
 def run_silver_bullet_cycle():
-    """Run the ICT Silver Bullet setup scan only within the configured UTC windows."""
-    from config import FOREX_ENABLED, FOREX_PAIRS
+    """
+    Generic Silver Bullet tick — the safety net behind the per-session jobs.
+
+    The scheduled scanners run per session inside their own windows. This one
+    exists for the startup thread and as a catch-all: it performs the day
+    rollover and the pre-session marking that must happen even when no session
+    is open, then delegates to the same scan body the session jobs use.
+
+    It never scans outside a window — `_silver_bullet_scan_once` is only reached
+    when `current_session` names a live window.
+    """
+    from config import FOREX_ENABLED
     if not FOREX_ENABLED:
         return
 
     try:
-        from modules.silver_bullet import (
-            calculate_daily_bias_all_pairs,
-            current_session,
-            expire_setups,
-            get_daily_bias,
-            run_silver_bullet_scan,
-            reset_daily_cache,
-        )
+        from modules.silver_bullet import (current_session, ensure_current_day,
+                                           expire_setups, pre_session_mark_liquidity,
+                                           sessions_opening_within)
 
         now = datetime.utcnow()
-        if now.hour == 0 and now.minute <= 2:
-            reset_daily_cache()
+
+        # UTC day rollover. APScheduler's 00:01 cron is skipped entirely when the
+        # process slept through it, so the rollover is also detected here on
+        # every tick rather than trusted to the cron alone.
+        if ensure_current_day(now):
+            print("[silver] UTC day rolled — daily state reset")
+
+        # Mark each window's liquidity shortly BEFORE it opens, so the levels are
+        # the pre-session pools rather than candles from inside the window.
+        for name in sessions_opening_within(5, now):
+            try:
+                n = pre_session_mark_liquidity(name, now)
+                print(f"[silver] {name} pre-session levels marked for {n} symbols")
+            except Exception as e:
+                print(f"[silver] {name} pre-session marking error: {e}")
 
         session = current_session(now)
         if session is None:
-            expire_setups()
+            expire_setups(now=now)
             return
 
-        # Bias is required for the Silver Bullet filter; compute it once per day
-        # before the first liquid session starts and keep a safe fallback for any
-        # restart or stale cache.
-        if not any(get_daily_bias(symbol) for symbol in FOREX_PAIRS):
-            calculate_daily_bias_all_pairs()
-
-        run_silver_bullet_scan(session)
-        expire_setups(session)
+        _silver_bullet_scan_once(session, now)
     except Exception as e:
         print(f"[silver] cycle error: {e}")
 
 
-def run_silver_bullet_entry_check():
-    """Enter on active Silver Bullet FVG setups once price returns to the gap."""
+def run_silver_bullet_entry_check(now: Optional[datetime] = None):
+    """
+    Enter on active Silver Bullet FVG setups once price returns to the gap.
+
+    `now` is injectable so the session and end-of-day guards are testable. They
+    used to read the wall clock directly, which meant the guards could only be
+    exercised by waiting for the right hour — so the one property that matters
+    most (no entry outside a window) was the hardest to prove.
+    """
     from config import FOREX_ENABLED, FOREX_MIN_CONF
     if not FOREX_ENABLED:
         return
 
+    ref = now or datetime.utcnow()
+
     try:
         from modules.risk_settings import get_settings
-        from modules.market_data_forex import get_candles, get_current_price, get_session
+        from modules.candle_provider import get_candles, get_current_price, is_binance
+        from modules.market_data_forex import get_session
         from modules.silver_bullet import (
             check_entry_in_fvg,
             clear_active_setup,
             current_session,
             get_active_setups,
         )
-        from modules.kronos_engine import get_cached_bias
         from modules.forex_executor import place_forex_order
         from modules.forex_position_manager import can_open_forex_trade, forex_block_log_once
 
-        if current_session() is None:
+        # NOTE: the Kronos confidence boost that used to sit here is REMOVED.
+        # `run_kronos_bias_update` is retired, so `get_cached_bias` returns None
+        # for every symbol and the boost was dead code — but leaving the call in
+        # place would mean a stale cache entry (from a pre-migration process)
+        # could still raise a Silver Bullet score, letting a retired engine
+        # influence whether a live trade is taken. The score is now the
+        # strategy's own.
+
+        if current_session(ref) is None:
             for symbol in list(get_active_setups()):
                 clear_active_setup(symbol)
             return
 
-        pause = get_session().rate_limit_remaining()
-        if pause > 0:
-            print(f"[silver-entry] rate-limit pause active ({pause:.0f}s) — deferring")
+        # End-of-day cutoff. The last window closes at 20:00 UTC; a setup that
+        # retests after that would be carried into the illiquid rollover with no
+        # session left to develop in. Checked HERE as well as at the session
+        # level because this job runs every 30 seconds and must not depend on
+        # the scan job having cleaned up.
+        if ref.hour >= EOD_NO_NEW_ENTRIES_HOUR:
+            print(f"[silver-entry] past the {EOD_NO_NEW_ENTRIES_HOUR}:00 UTC "
+                  f"cutoff — no new entries")
+            for symbol in list(get_active_setups()):
+                clear_active_setup(symbol)
             return
+
+        # Capital.com pacing only applies to the Capital.com symbols; a Binance
+        # symbol must not be deferred because the broker we are not calling is
+        # throttled.
+        pause = get_session().rate_limit_remaining()
 
         min_conf = float(get_settings().get("forex_min_confidence", FOREX_MIN_CONF))
         for symbol, setup in list(get_active_setups().items()):
             try:
-                if setup.get("session") != current_session():
+                if setup.get("session") != current_session(ref):
                     continue
 
-                allowed, reason = can_open_forex_trade(symbol)
-                if not allowed:
-                    if forex_block_log_once(symbol, reason):
-                        print(f"[silver-entry] {symbol} blocked: {reason}")
-                    record_diagnostic("forex", symbol, "REJECT", reason)
-                    continue
+                if not is_binance(symbol):
+                    # Crypto entries are ordered by the crypto entry path, which
+                    # has its own sizing and duplicate handling. This job only
+                    # executes the Capital.com side of the strategy.
+                    if pause > 0:
+                        print(f"[silver-entry] {symbol} rate-limit pause active "
+                              f"({pause:.0f}s) — deferring")
+                        continue
+
+                    allowed, reason = can_open_forex_trade(symbol)
+                    if not allowed:
+                        if forex_block_log_once(symbol, reason):
+                            print(f"[silver-entry] {symbol} blocked: {reason}")
+                        record_diagnostic("forex", symbol, "REJECT", reason)
+                        continue
 
                 price = get_current_price(symbol)
                 if not price:
                     continue
 
                 df_5m = get_candles(symbol, timeframe="5m", limit=100)
-                signal = check_entry_in_fvg(setup, price, df_5m)
+                # `ref` is threaded through so the expiry check inside the entry
+                # condition uses the same clock as the guards above. Reading the
+                # wall clock here meant a test could not exercise the entry path
+                # at a chosen time, and a delayed job could evaluate the setup
+                # against a different instant than it was admitted on.
+                signal = check_entry_in_fvg(setup, price, df_5m, now=ref)
                 if not signal:
                     continue
 
-                bias = get_cached_bias(symbol)
-                if bias:
-                    signal["confidence"] += bias.get("confidence_boost", 0)
-                    signal["confidence"] = min(signal["confidence"], 99)
-
                 if signal["confidence"] < min_conf:
                     print(f"[silver-entry] {symbol} confidence too low: {signal['confidence']:.0f}%")
+                    continue
+
+                if is_binance(symbol):
+                    # Crypto Silver Bullet entries go through the Binance path
+                    # with the same confidence tiers as the FX side, sized in
+                    # base-asset units on the exchange's step grid — a crypto
+                    # quantity is not a Capital.com "lot" and must not be sized
+                    # from the FX contract table.
+                    #
+                    # This covers EVERY enabled crypto symbol, not just BTC/ETH:
+                    # the roster comes from the crypto universe, and the sizing
+                    # reads each symbol's own step and minimum notional.
+                    from modules.executor import calculate_silver_bullet_crypto_size
+                    from modules.market_data import get_balance
+
+                    balance = get_balance()
+                    sizing = calculate_silver_bullet_crypto_size(
+                        symbol, signal["entry_price"], signal["stop_loss"],
+                        signal["confidence"], balance,
+                    )
+                    if not sizing["ok"]:
+                        record_diagnostic("crypto", symbol, "REJECT",
+                                          f"sizing: {sizing['reason']}",
+                                          signal["confidence"])
+                        print(f"[silver-entry] {symbol} crypto size rejected: "
+                              f"{sizing['reason']}")
+                        continue
+
+                    crypto_result = place_crypto_order(
+                        symbol, signal, sizing, balance
+                    )
+                    if crypto_result["success"]:
+                        record_diagnostic(
+                            "crypto", symbol, "PASS",
+                            f"order placed @ {signal['entry_price']:.2f} "
+                            f"qty={sizing['qty']}",
+                            signal["confidence"], signal.get("entry_type"))
+                        print(f"[crypto] ENTRY {signal['signal']} {symbol} "
+                              f"qty={sizing['qty']} | conf={signal['confidence']:.0f}% | "
+                              f"SL={signal['stop_loss']:.2f} TP3={signal['tp3']:.2f}")
+                        clear_active_setup(symbol)
+                    else:
+                        record_diagnostic("crypto", symbol, "REJECT",
+                                          f"order failed: {crypto_result.get('error')}",
+                                          signal["confidence"])
+                        print(f"[silver-entry] {symbol} crypto order failed: "
+                              f"{crypto_result.get('error')}")
                     continue
 
                 blocked = guard_order(symbol, "forex")
@@ -593,7 +721,11 @@ def run_silver_bullet_entry_check():
                     print(f"[silver-entry] {symbol} order suppressed: {blocked['error']}")
                     continue
 
-                result = place_forex_order(signal, bias or {})
+                # The bias argument is the strategy's own daily record, not the
+                # retired Kronos bias — `place_forex_order` records it on the
+                # trade row for the audit trail.
+                result = place_forex_order(signal, {"h4_bias": setup.get("bias")},
+                                           strategy=STRATEGY_SILVER_BULLET)
                 if result["success"]:
                     record_diagnostic("forex", symbol, "PASS",
                                       f"order placed @ {signal['entry_price']:.5f}",
@@ -614,9 +746,187 @@ def run_silver_bullet_entry_check():
         print(f"[silver-entry] cycle error: {e}")
 
 
+def run_silver_bullet_bias():
+    """
+    07:00 UTC — compute the daily H4 bias and the previous-day volume profile.
+
+    Runs before the first session opens so the scan never has to compute a bias
+    mid-window, and so a slow or failing venue is discovered an hour before the
+    first trade would have been taken.
+    """
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.silver_bullet import calculate_daily_bias_all_pairs
+
+        n = calculate_daily_bias_all_pairs()
+        print(f"[silver] daily bias + volume profile computed for {n} symbols")
+    except Exception as e:
+        print(f"[silver] bias job error: {e}")
+
+
+def run_silver_bullet_presession():
+    """
+    Prepare pre-session liquidity levels for whichever window opens next.
+
+    07:55 / 14:55 / 18:55 UTC — five minutes before each window. Marking from
+    outside the window is what makes the levels the pools the session sweeps
+    rather than the move already in progress.
+    """
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.silver_bullet import (pre_session_mark_liquidity,
+                                           sessions_opening_within)
+
+        now = datetime.utcnow()
+        upcoming = sessions_opening_within(5, now)
+        if not upcoming:
+            print(f"[silver] no window opens within 5 minutes of "
+                  f"{now:%H:%M} UTC — nothing to mark")
+            return
+
+        for name in upcoming:
+            n = pre_session_mark_liquidity(name, now)
+            print(f"[silver] {name} pre-session levels marked for {n} symbols")
+    except Exception as e:
+        print(f"[silver] pre-session job error: {e}")
+
+
+def run_silver_bullet_scanner(session_name: str):
+    """
+    One session's scanner, run every five minutes inside that window only.
+
+    The session name is bound at registration time and re-validated inside the
+    scan, so a misfire, a coalesced run or a clock skew cannot let the London
+    job trade the New York window. `run_silver_bullet_cycle` is kept as the
+    generic entry point the startup thread calls.
+    """
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.silver_bullet import current_session
+
+        now = datetime.utcnow()
+        active = current_session(now)
+        if active != session_name:
+            # Not an error: this job fires only inside its own window, but a
+            # coalesced or delayed run can land outside it.
+            print(f"[silver] {session_name} scanner skipped — active session is "
+                  f"{active or 'none'} at {now:%H:%M} UTC")
+            return
+
+        _silver_bullet_scan_once(session_name, now)
+    except Exception as e:
+        print(f"[silver] {session_name} scanner error: {e}")
+
+
+def _silver_bullet_scan_once(session_name: str, now: datetime) -> None:
+    """The shared body of a session scan, used by both entry points."""
+    from modules.silver_bullet import (calculate_daily_bias_all_pairs,
+                                       expire_setups, get_daily_bias,
+                                       in_news_blackout, run_silver_bullet_scan)
+    from config import SILVER_BULLET_INSTRUMENTS
+
+    # A bias computed at 07:00 can be missing if the process started later, so
+    # it is topped up here rather than silently scanning with no direction.
+    missing = [s for s in SILVER_BULLET_INSTRUMENTS if get_daily_bias(s, now) is None]
+    if missing:
+        print(f"[silver] {len(missing)} symbol(s) missing today's bias — computing")
+        calculate_daily_bias_all_pairs()
+
+    blocked, label = in_news_blackout(now)
+    if blocked:
+        print(f"[silver] {session_name} inside news blackout {label} — scan skipped")
+        expire_setups(session_name, now)
+        return
+
+    run_silver_bullet_scan(session_name, now)
+    expire_setups(session_name, now)
+
+
+def run_end_of_day_policy():
+    """
+    20:30 UTC — cancel pending setups and report the open book.
+
+    Open positions are deliberately NOT closed here: they keep their stop, their
+    target and their trailing rule. See `end_of_day_policy` for why.
+    """
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.forex_position_manager import end_of_day_policy
+
+        result = end_of_day_policy()
+        print(f"[forex] end-of-day — {result['cancelled_setups']} setup(s) "
+              f"cancelled, {result['held_positions']} position(s) held under "
+              f"management, {result['errors']} error(s)")
+    except Exception as e:
+        print(f"[forex] end-of-day job error: {e}")
+
+
+def run_daily_report():
+    """23:00 UTC — build and log the day's forex report."""
+    from config import FOREX_ENABLED
+    if not FOREX_ENABLED:
+        return
+
+    try:
+        from modules.forex_position_manager import build_daily_report
+
+        report = build_daily_report()
+        print(f"[forex-report] {report['date']} — opened={report['opened']} "
+              f"closed={report['closed']} W/L={report['wins']}/{report['losses']} "
+              f"realised=${report['realised_pnl']:+.2f} "
+              f"open={report['open_positions']} "
+              f"unrealised=${report['unrealised_pnl']:+.2f}")
+        for symbol, node in sorted(report["by_symbol"].items()):
+            print(f"[forex-report]   {symbol}: {node['trades']} trades "
+                  f"({node['wins']}W) ${node['pnl']:+.2f}")
+    except Exception as e:
+        print(f"[forex-report] job error: {e}")
+
+
 def run_forex_entry_check():
-    """Check for SMC entry on active CRT setups"""
+    """
+    Legacy CRT/SMC forex entry check — DISABLED as an order source.
+
+    The Silver Bullet engine is the unified strategy. This job is kept
+    registered only so its diagnostic logging and the `_forex_active_setups`
+    bookkeeping continue to run for the dashboard; it does NOT submit orders.
+
+    The lock is enforced in two places on purpose:
+
+      * HERE, so the job returns early and does not waste broker API calls
+        evaluating setups whose orders would be refused anyway; and
+      * in `place_forex_order`, which is the chokepoint that actually sends the
+        order, so any other caller someone adds later is covered too.
+
+    Both fail closed: `legacy_entries_enabled()` returns False when the flag
+    cannot be read.
+    """
     global _forex_active_setups
+
+    from modules.forex_executor import legacy_entries_enabled
+    if not legacy_entries_enabled():
+        if _forex_active_setups:
+            print(f"[forex-entry] legacy CRT entries disabled during the Silver "
+                  f"Bullet migration — {len(_forex_active_setups)} setup(s) held, "
+                  f"no orders submitted")
+            # The setups are stale by construction: nothing will ever fill them,
+            # so keeping them would make the dashboard advertise tradeable
+            # setups that cannot trade.
+            _forex_active_setups = {}
+        return
+
     if not _forex_active_setups:
         return
 
@@ -708,7 +1018,8 @@ def run_forex_entry_check():
                             print(f"[forex-entry] {symbol} order suppressed: "
                                   f"{blocked['error']}")
                             continue
-                        result = place_forex_order(signal, bias or {})
+                        result = place_forex_order(signal, bias or {},
+                                                   strategy=STRATEGY_LEGACY_CRT)
                         if result['success']:
                             record_diagnostic("forex", symbol, "PASS",
                                               f"order placed @ "
@@ -745,6 +1056,76 @@ def run_forex_entry_check():
         lock.release()
 
 
+def place_crypto_order(symbol: str, signal: Dict, sizing: Dict,
+                       balance: float) -> Dict:
+    """
+    Open a Binance position for a Silver Bullet crypto setup.
+
+    Deliberately separate from `executor.place_order`, which the retired crypto
+    strategy used: that function recomputes size from
+    `calculate_risk_with_compounding` and applies its own leverage tiers, so
+    routing Silver Bullet through it would override the tier the strategy chose.
+
+    The Trade row records the same management state the FX side does, so
+    `position_manager` can apply the five rules to it without special-casing.
+
+    Preflight, in order: the shared strategy guard, the adapter check, then the
+    exchange rules. Any failure refuses before an order is built.
+    """
+    db = SessionLocal()
+    try:
+        from modules.market_data import place_order_raw
+        from modules.forex_executor import ADAPTER_BINANCE, execution_adapter_for
+        from modules.strategy_guard import STRATEGY_SILVER_BULLET
+        from models import Trade
+
+        # Adapter preflight: a symbol whose venue cannot be resolved must never
+        # reach the exchange.
+        if execution_adapter_for(symbol) != ADAPTER_BINANCE:
+            return {"success": False,
+                    "error": f"{symbol} is not served by the Binance adapter"}
+
+        side = "BUY" if signal["signal"] == "BUY" else "SELL"
+        qty = sizing["qty"]
+
+        result = place_order_raw(symbol, side, qty)
+        if not result or not result.get("success"):
+            err = (result or {}).get("error", "no response")
+            return {"success": False, "error": err}
+
+        fill = float(result.get("fill_price") or signal["entry_price"])
+        risk_distance = abs(fill - float(signal["stop_loss"]))
+
+        trade = Trade(
+            asset=symbol,
+            signal=signal["signal"],
+            confidence=signal["confidence"],
+            entry_price=fill,
+            stop_loss=signal["stop_loss"],
+            take_profit=signal["tp3"],
+            position_sz=qty,
+            risk_usd=round(sizing["risk_quote"], 4),
+            risk_reward=round(abs(float(signal["tp3"]) - fill) / risk_distance, 4)
+                        if risk_distance else 0.0,
+            outcome="OPEN",
+            binance_order_id=result.get("order_id", ""),
+            created_at=datetime.utcnow(),
+        )
+        db.add(trade)
+        db.commit()
+        db.refresh(trade)
+
+        return {"success": True, "trade_id": trade.id, "fill_price": fill,
+                "qty": qty, "risk_usd": sizing["risk_quote"]}
+
+    except Exception as e:
+        db.rollback()
+        print(f"[crypto] place_crypto_order error {symbol}: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        db.close()
+
+
 def run_forex_position_monitor():
     """Monitor forex positions via Capital.com"""
     from config import FOREX_ENABLED
@@ -752,8 +1133,17 @@ def run_forex_position_monitor():
         return
     
     try:
-        from modules.forex_position_manager import check_forex_positions
+        from modules.forex_position_manager import (check_forex_positions,
+                                                    manage_open_positions)
         check_forex_positions()
+        # The Silver Bullet management rules (breakeven, trailing, partials,
+        # session and reversal exits) run on the same cycle as reconciliation,
+        # so a position is never left trailing a price the monitor has not seen.
+        stats = manage_open_positions()
+        if stats.get("closed") or stats.get("partials") or stats.get("stops"):
+            print(f"[forex-manage] checked={stats['checked']} "
+                  f"partials={stats['partials']} stops={stats['stops']} "
+                  f"closed={stats['closed']} errors={stats['errors']}")
     except Exception as e:
         print(f"[forex-positions] error: {e}")
 
@@ -945,7 +1335,15 @@ def _keep_alive():
 # ── Scheduler ─────────────────────────────────────────────────────
 
 def _scanner_watchdog():
-    """Forces L1 scan every 16 min if scheduler missed it."""
+    """
+    Nudges the Silver Bullet scanner if the scheduler missed a window.
+
+    This used to force an L1 BOS scan, which is a retired strategy. A watchdog
+    that resurrects a retired strategy is worse than no watchdog, so it now
+    drives the surviving one: if a session window is open, run the cycle. The
+    cycle is itself gated on the live session, so this cannot trade outside a
+    window even if the clock and the schedule disagree.
+    """
     import time as _time
     while True:
         _time.sleep(960)
@@ -953,8 +1351,12 @@ def _scanner_watchdog():
         try:
             state = _get_bot_state(db)
             if state.is_running and not state.paused:
-                print("[watchdog] forcing L1 scan")
-                threading.Thread(target=level1_bos_scan, daemon=True).start()
+                from modules.silver_bullet import current_session
+                session = current_session()
+                if session:
+                    print(f"[watchdog] forcing {session} Silver Bullet scan")
+                    threading.Thread(target=run_silver_bullet_cycle,
+                                     daemon=True).start()
         except Exception as e:
             print(f"[watchdog] error: {e}")
         finally:
@@ -965,28 +1367,100 @@ scheduler = BackgroundScheduler()
 # Shared job options — never pile up overlapping runs
 _JOB_OPTS = dict(max_instances=1, coalesce=True, misfire_grace_time=30)
 
-# Crypto jobs
-scheduler.add_job(check_positions,      "interval", minutes=2, **_JOB_OPTS)
-scheduler.add_job(level2_entry_check,   "interval", seconds=60, **_JOB_OPTS)
-scheduler.add_job(level1_bos_scan,      "interval", minutes=SCAN_INTERVAL_MIN, **_JOB_OPTS)
-scheduler.add_job(refresh_signal_cache, "interval", minutes=10, **_JOB_OPTS)
+# ── Crypto POSITION MANAGEMENT (not a strategy) ───────────────────────────────
+# `check_positions` reconciles Binance positions and enforces their stop/target.
+# It is the crypto counterpart of `run_forex_position_monitor` and is retained:
+# existing open positions must keep being managed regardless of which strategy
+# opened them.
+scheduler.add_job(check_positions, "interval", minutes=2,
+                  id="crypto_position_monitor", **_JOB_OPTS)
 
-# Forex jobs
-scheduler.add_job(run_kronos_bias_update,     "interval", minutes=15, **_JOB_OPTS)
-# Refined CRT — NY pre-open + London open are prioritised, 30-min monitor runs continuously
-scheduler.add_job(run_crt_scan,               "cron", hour=12, minute=30, timezone="UTC", **_JOB_OPTS)
-scheduler.add_job(run_crt_scan,               "cron", hour=8,  minute=0,  timezone="UTC", **_JOB_OPTS)
-scheduler.add_job(run_crt_scan,               "interval", minutes=30, **_JOB_OPTS)
-scheduler.add_job(run_silver_bullet_cycle,    "interval", minutes=5, **_JOB_OPTS)
-scheduler.add_job(run_silver_bullet_entry_check, "interval", seconds=30, **_JOB_OPTS)
-scheduler.add_job(run_forex_entry_check,      "interval", seconds=60, **_JOB_OPTS)
-scheduler.add_job(run_forex_position_monitor, "interval", minutes=2, **_JOB_OPTS)
-scheduler.add_job(run_daily_pdh_pdl_reset,    "cron", hour=0, minute=1, **_JOB_OPTS)
+# ── RETIRED: legacy crypto SMC/CRT strategy jobs ──────────────────────────────
+# `level1_bos_scan`, `level2_entry_check`, `refresh_signal_cache`,
+# `run_crypto_crt_scan` and `run_crypto_entry_check` are NOT registered.
+#
+# They generated entries from the BOS/CRT/SMC engines, which are retired —
+# Silver Bullet is the only strategy permitted to submit an order. Their
+# functions remain defined in this module for historical reference, and the
+# shared diagnostic helpers they used still work, but nothing schedules them.
+#
+# They are unregistered rather than deleted so the migration is reviewable: the
+# diff shows a job removed from the schedule rather than a file vanishing.
 
-# Crypto jobs — same 3-layer strategy (Kronos + CRT + SMC)
-scheduler.add_job(run_crypto_kronos_bias,     "interval", minutes=15, **_JOB_OPTS)
-scheduler.add_job(run_crypto_crt_scan,        "interval", minutes=15, **_JOB_OPTS)
-scheduler.add_job(run_crypto_entry_check,     "interval", seconds=60, **_JOB_OPTS)
+# ── Silver Bullet + Volume Profile strategy (UTC) ─────────────────────────────
+#
+# The schedule below is the strategy's own clock. Two things are deliberate:
+#
+#   * the scanners are per-session CRON jobs bound to a session name, not one
+#     free-running interval. A single interval job that internally asks "which
+#     session is open?" trades whatever the clock says at the moment it fires,
+#     which makes "the London scanner only runs in London" a property of the
+#     data rather than of the schedule. Binding the name at registration means a
+#     misfire cannot silently scan the wrong window — and the name is re-checked
+#     inside the job as well.
+#   * the roster is EVERY enabled instrument — forex, metals and crypto alike —
+#     because `SILVER_BULLET_INSTRUMENTS` is derived from FOREX_PAIRS plus the
+#     crypto universe rather than hand-listed.
+#
+# Explicit ids on every strategy job, so a test can assert the schedule without
+# parsing trigger reprs, and so a duplicate registration is detectable rather
+# than silently becoming two jobs.
+scheduler.add_job(run_silver_bullet_bias, "cron", hour=7, minute=0,
+                  timezone="UTC", id="silver_daily_bias", **_JOB_OPTS)
+
+# Pre-session liquidity: five minutes before each window opens.
+for _presession_hour, _presession_minute in ((7, 55), (14, 55), (18, 55)):
+    scheduler.add_job(run_silver_bullet_presession, "cron",
+                      hour=_presession_hour, minute=_presession_minute,
+                      timezone="UTC",
+                      id=f"silver_presession_{_presession_hour:02d}{_presession_minute:02d}",
+                      **_JOB_OPTS)
+
+# The three session scanners, every five minutes inside their own window.
+for _session, (_start_hour, _end_hour, _bonus) in SESSIONS.items():
+    scheduler.add_job(run_silver_bullet_scanner, "cron",
+                      hour=_start_hour, minute="*/5",
+                      timezone="UTC",
+                      args=[_session], id=f"silver_scan_{_session}",
+                      **_JOB_OPTS)
+
+# Safety net: rollover + pre-session marking even if a cron was missed.
+scheduler.add_job(run_silver_bullet_cycle, "interval", minutes=5,
+                  id="silver_cycle", **_JOB_OPTS)
+
+# Entry: only ever fills a setup whose session is open right now.
+scheduler.add_job(run_silver_bullet_entry_check, "interval", seconds=30,
+                  id="silver_entry_check", **_JOB_OPTS)
+
+# ── Forex position lifecycle ──────────────────────────────────────────────────
+scheduler.add_job(run_forex_position_monitor, "interval", minutes=2,
+                  id="forex_position_monitor", **_JOB_OPTS)
+scheduler.add_job(run_end_of_day_policy, "cron", hour=EOD_HOUR,
+                  minute=EOD_MINUTE, timezone="UTC",
+                  id="forex_end_of_day", **_JOB_OPTS)
+scheduler.add_job(run_daily_report, "cron", hour=23, minute=0,
+                  timezone="UTC", id="forex_daily_report", **_JOB_OPTS)
+
+# ── RETIRED: legacy CRT/SMC strategy jobs ─────────────────────────────────────
+# `run_kronos_bias_update`, `run_crt_scan`, `run_forex_entry_check`,
+# `run_daily_pdh_pdl_reset` and the three crypto strategy jobs are NOT
+# registered.
+#
+#   run_crt_scan            discovered CRT setups for the retired entry path
+#   run_forex_entry_check   submitted those setups as orders
+#   run_daily_pdh_pdl_reset refreshed the CRT range cache those setups used
+#   run_kronos_bias_update  produced a Kronos bias only the CRT path consulted
+#   run_crypto_crt_scan     the crypto equivalent of run_crt_scan
+#   run_crypto_entry_check  submitted those setups as orders
+#   run_crypto_kronos_bias  produced a Kronos bias nothing consults any more
+#
+# With Silver Bullet as the only strategy, none of them has a consumer that can
+# trade, and a data-refresh job whose only purpose is to feed a retired strategy
+# is the "running merely to populate a UI card" case. The dashboard's levels
+# come from the Silver Bullet volume profile instead.
+#
+# Their functions remain defined above for historical reference; nothing
+# schedules them.
 
 scheduler.start()
 
@@ -1037,27 +1511,25 @@ async def startup():
                 print(f"[capital] startup check error: {e}")
         threading.Thread(target=_verify_capital, daemon=True).start()
 
+        # The Kronos model is NOT loaded. It was the bias layer of the retired
+        # Kronos+CRT+SMC stack, and nothing in the Silver Bullet path consults
+        # its output — so loading a multi-hundred-megabyte model at startup
+        # would cost memory and boot time for a decision that is never made.
+        # `KRONOS_ENABLED` is left in config so the flag's history is intact.
         if KRONOS_ENABLED:
-            print("[weltbot] loading Kronos model...")
-            from modules.kronos_engine import _load_kronos_model
-            threading.Thread(target=_load_kronos_model, daemon=True).start()
-        else:
-            print("[kronos] disabled — using neutral bias")
+            print("[kronos] retired — Silver Bullet does not consult a Kronos bias")
 
-        from modules.crt_detector import update_all_ranges
-        threading.Thread(target=update_all_ranges, daemon=True).start()
+        # The CRT range cache is NOT refreshed: it fed the retired CRT entry
+        # path and the dashboard card that displayed it. Both are now served
+        # from the Silver Bullet volume profile, so the refresh would be a
+        # periodic broker call for data nothing reads.
 
-        threading.Thread(target=run_kronos_bias_update, daemon=True).start()
-        threading.Thread(target=run_crt_scan, daemon=True).start()
         threading.Thread(target=run_silver_bullet_cycle, daemon=True).start()
 
-    # Crypto 3-layer strategy bootstrap (Kronos + CRT + SMC)
-    if KRONOS_ENABLED:
-        threading.Thread(target=run_crypto_kronos_bias, daemon=True).start()
-        threading.Thread(target=run_crypto_crt_scan,    daemon=True).start()
-    
-    threading.Thread(target=refresh_signal_cache, daemon=True).start()
-    threading.Thread(target=level1_bos_scan,      daemon=True).start()
+    # The crypto strategy bootstrap is retired: Silver Bullet scans every crypto
+    # symbol from the same universe on the same session windows, so there is no
+    # separate crypto strategy to warm up.
+
     threading.Thread(target=_keep_alive,           daemon=True).start()
     threading.Thread(target=_scanner_watchdog,     daemon=True).start()
 
@@ -1107,7 +1579,12 @@ def bot_status():
             "forex_enabled": True,
             "forex_provider": "capital.com",
             "kronos_available": is_kronos_available(),
+            # The legacy CRT entry queue. Empty during the migration by design;
+            # the tradeable setups are the Silver Bullet ones in
+            # /api/forex/silver-bullet. Kept so an existing consumer does not
+            # break on a missing key.
             "forex_active_setups": list(_forex_active_setups.keys()),
+            "forex_legacy_entries_enabled": _legacy_entries_enabled(),
             "forex_balance": round(forex_balance, 2),
             "forex_equity":  round(forex_balance + forex_profit_loss, 2),
             "forex_unrealized": round(forex_profit_loss, 2),
@@ -1119,11 +1596,15 @@ def bot_status():
                       "forex_unrealized": 0.0, "forex_connected": False,
                       "total_balance": round(balance, 2)}
 
-    # Crypto strategy state
-    crypto_info = {"kronos_enabled": KRONOS_ENABLED, "crypto_active_setups": []}
+    # Crypto strategy state — Silver Bullet's pending setups for this venue.
+    crypto_info = {"strategy": "SILVER_BULLET", "crypto_active_setups": []}
     try:
-        from modules.crypto_strategy import get_crypto_setups
-        crypto_info["crypto_active_setups"] = list(get_crypto_setups().keys())
+        from modules.silver_bullet import get_active_setups
+        from modules.universe import get_universe
+        universe = set(get_universe())
+        crypto_info["crypto_active_setups"] = [
+            s for s in get_active_setups() if s in universe
+        ]
     except Exception:
         pass
 
@@ -1146,7 +1627,7 @@ def start_bot():
     state = _get_bot_state(db)
     state.is_running = 1; state.paused = 0; state.pause_reason = None
     db.commit(); db.close()
-    threading.Thread(target=level1_bos_scan, daemon=True).start()
+    threading.Thread(target=run_silver_bullet_cycle, daemon=True).start()
     return {"message": "WeltBot v5.0 started"}
 
 
@@ -1165,7 +1646,7 @@ def resume_bot():
     state.paused = 0
     state.pause_reason = None
     db.commit(); db.close()
-    threading.Thread(target=level1_bos_scan, daemon=True).start()
+    threading.Thread(target=run_silver_bullet_cycle, daemon=True).start()
     return {"message": "Bot resumed", "cleared_pause": was}
 
 
@@ -1180,9 +1661,15 @@ def stop_bot():
 
 @app.post("/api/bot/scan-now")
 def scan_now():
-    threading.Thread(target=level1_bos_scan,    daemon=True).start()
-    threading.Thread(target=level2_entry_check, daemon=True).start()
-    return {"message": "Manual scan triggered"}
+    """
+    Manual scan trigger.
+
+    Runs the Silver Bullet cycle, which is gated on the live session — so a
+    manual invocation outside a permitted window does nothing rather than
+    trading. The retired BOS/entry pair is deliberately not reachable here.
+    """
+    threading.Thread(target=run_silver_bullet_cycle, daemon=True).start()
+    return {"message": "Manual Silver Bullet scan triggered"}
 
 
 @app.post("/api/bot/close-all")

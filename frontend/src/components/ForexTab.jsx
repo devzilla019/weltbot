@@ -1,10 +1,29 @@
 import{useState,useEffect}from"react";
-import CRTSignalCard from"./CRTSignalCard";
+import SilverBulletCard from"./SilverBulletCard";
 import{forexApi}from"../api";
 import{useApp}from"../context/AppContext";
 
 const fmtMoney=v=>`${v>=0?"+":""}$${Math.abs(v||0).toFixed(2)}`;
 const fmtP=v=>v==null?"—":Number(v).toFixed(5);
+
+// Human labels for the engine's setup states.
+const STATE_LABELS={
+  WAITING:"Waiting",
+  SWEEP_DETECTED:"Sweep",
+  MSS_CONFIRMED:"MSS",
+  FVG_FOUND:"FVG armed",
+  IN_TRADE:"In trade",
+  EXPIRED:"Expired",
+  INVALID:"Rejected",
+};
+
+// Format seconds as H:MM:SS for the session countdown.
+const fmtCountdown=s=>{
+  if(!s||s<=0)return"00:00";
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60);
+  const pad=n=>String(n).padStart(2,"0");
+  return h>0?`${h}:${pad(m)}:${pad(sec)}`:`${pad(m)}:${pad(sec)}`;
+};
 
 export default function ForexTab(){
   const{showToast}=useApp();
@@ -27,7 +46,6 @@ export default function ForexTab(){
     catch(e){setErr(e.message);}
     finally{setLoading(false);}
   };
-
   const handleClose=async(id)=>{
     setBusy(true);
     try{
@@ -81,9 +99,10 @@ export default function ForexTab(){
     </div>
   );
 
-  const{biases,crt_levels,positions,account,kronos_available,pairs,daily_risk}=data;
+  const{biases,crt_levels,positions,account,kronos_available,pairs,daily_risk,silver_bullet}=data;
   const openPos=positions?.open_positions||[];
   const risk=daily_risk;
+  const sb=silver_bullet;
   const totalOpenPnl=openPos.reduce((s,p)=>s+(p.pnl||0),0);
   const closedTrades=history.filter(t=>t.outcome!=="OPEN");
   const closedPnl=closedTrades.reduce((s,t)=>s+(t.pnl||0),0);
@@ -104,18 +123,52 @@ export default function ForexTab(){
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap",position:"relative",zIndex:1}}>
           <div>
             <div className="hero-title">Forex & Metals <span className="accent">Trading</span></div>
-            <div className="hero-sub">CRT + SMC + Kronos AI · Capital.com</div>
-          </div>
-          <button className="btn btn-scan btn-sm" onClick={runTest} disabled={testing}>
+            <div className="hero-sub">Silver Bullet + Volume Profile · Capital.com</div>
+          </div>          <button className="btn btn-scan btn-sm" onClick={runTest} disabled={testing}>
             {testing?"Testing…":"⚡ Test Connection"}
           </button>
         </div>
         <div className="hero-chips">
+          <span className="hero-chip">Session <b>{sb?.active_session||"—"}</b></span>
+          {sb?.time_remaining_seconds>0&&(
+            <span className="hero-chip">Closes in <b>{fmtCountdown(sb.time_remaining_seconds)}</b></span>
+          )}
           <span className="hero-chip">Kronos <b>{kronos_available?"ACTIVE":"OFFLINE"}</b></span>
           <span className="hero-chip">Pairs <b>{pairs?.length||0}</b></span>
           <span className="hero-chip">Open <b>{positions?.open_count||0}</b></span>
+          <span className="hero-chip">Pending <b>{sb?.pending_count||0}</b></span>
           <span className="hero-chip">Win Rate <b>{positions?.win_rate||0}%</b></span>
         </div>
+        {/* Forex-only daily P&L. Kept separate from the crypto figures so the
+            two books are never conflated. */}
+        {risk&&(
+          <div className="hero-chips" style={{marginTop:8}}>
+            <span className="hero-chip">
+              Forex P&L today{" "}
+              <b style={{color:(risk.realised_pnl||0)>=0?"var(--buy)":"var(--sell)"}}>
+                {fmtMoney(risk.realised_pnl)}
+              </b>
+            </span>
+            <span className="hero-chip">Open P&L <b>{fmtMoney(totalOpenPnl)}</b></span>
+            <span className="hero-chip">
+              Budget left <b>${(risk.remaining_budget||0).toFixed(2)}</b>
+            </span>
+            {risk.halted&&<span className="hero-chip"><b style={{color:"var(--sell)"}}>HALTED</b></span>}
+          </div>
+        )}
+
+        {/* Session windows with their next open/close times, from the API. */}
+        {sb?.sessions&&(
+          <div className="hero-chips" style={{marginTop:8}}>
+            {Object.entries(sb.sessions).map(([name,w])=>(
+              <span key={name} className="hero-chip"
+                    style={w.is_open?{borderColor:"var(--buy)"}:undefined}>
+                {name.replace(/_/g," ")}{" "}
+                <b>{w.is_open?"OPEN":`${w.open_utc}–${w.close_utc}`}</b>
+              </span>
+            ))}
+          </div>
+        )}
 
         {kronos&&kronos.state!=="ready"&&(
           <div className="info-box info-box-warn" style={{marginTop:12,position:"relative",zIndex:1}}>
@@ -369,12 +422,66 @@ export default function ForexTab(){
 
       <div className="sec-head">
         <div className="sec-title">Market Signals</div>
-        <div className="sec-sub">{pairs?.length||0} pairs · PDH/PDL + Kronos bias</div>
+        <div className="sec-sub">
+          {pairs?.length||0} pairs · H4 bias + previous-day volume profile
+        </div>
       </div>
+
+      {/* Pending Silver Bullet setups, ranked by score. The score is a
+          rule-based ranking, not a probability of success. */}
+      {sb?.pending_setups?.length>0&&(
+        <>
+          <div className="sec-head">
+            <div className="sec-title">Pending Setups</div>
+            <div className="sec-sub">
+              {sb.pending_count} armed · minimum score {sb.min_confidence}
+            </div>
+          </div>
+          <div className="glass" style={{padding:0,marginBottom:16,overflow:"hidden"}}>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th><th>State</th><th>Dir</th><th>Session</th>
+                    <th>Score</th><th>VP</th><th>FVG</th><th>Expires</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sb.pending_setups.map(s=>(
+                    <tr key={s.symbol}>
+                      <td style={{fontWeight:600}}>{s.symbol}</td>
+                      <td>
+                        <span className={`chip ${s.executable?"chip-bull":"chip-wait"}`}
+                              style={{fontSize:8,padding:"1px 6px"}}>
+                          {STATE_LABELS[s.state]||s.state}
+                        </span>
+                      </td>
+                      <td style={{color:s.direction==="BUY"?"var(--buy)":"var(--sell)"}}>
+                        {s.direction||"—"}
+                      </td>
+                      <td style={{fontSize:10}}>{(s.session||"—").replace(/_/g," ")}</td>
+                      <td style={{color:(s.confidence||0)>=sb.min_confidence?"var(--buy)":"var(--warn)"}}>
+                        {s.confidence??"—"}
+                      </td>
+                      <td style={{fontSize:10}}>{s.vp_confluence||"—"}</td>
+                      <td style={{fontSize:10}}>
+                        {fmtP(s.fvg_low)}–{fmtP(s.fvg_high)}
+                      </td>
+                      <td style={{fontSize:10}}>
+                        {s.expires_at?String(s.expires_at).slice(11,16):"—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
 
       <div className="grid-pairs">
         {pairs?.map((sym,i)=>(
-          <CRTSignalCard key={sym} symbol={sym} index={i} bias={biases?.[sym]} levels={crt_levels?.[sym]}/>
+          <SilverBulletCard key={sym} symbol={sym} index={i} bias={sb?.biases?.[sym]||biases?.[sym]}/>
         ))}
       </div>
 

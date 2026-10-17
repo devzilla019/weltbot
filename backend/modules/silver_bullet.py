@@ -18,102 +18,104 @@ Pipeline per symbol:
   9. Confidence score           — must clear 88 to trade
 
 Synchronous only — no asyncio.
+
+This module ORCHESTRATES; it does not implement the strategy. Sessions, sweep,
+MSS, FVG, confluence, confidence, the 88 gate, the setup state machine and the
+FVG-retest entry all live in `modules.forex_signal_engine`, which is the single
+implementation. They are re-exported below so existing callers and the
+dashboard keep working, and so a second copy of the rules can never drift out
+of step with the first.
+
+What stays here is the day-scoped orchestration the engine has no opinion
+about: the H4 daily bias and its cache, the pre-session liquidity marks, the
+scan loop, and the pending-setup store the scheduler reads.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple
 
 import pandas as pd
 
 from modules.volume_profile import (calculate_session_volume_profile,
                                     check_fvg_confluence,
-                                    classify_price_position)
+                                    classify_price_position,
+                                    gateable,
+                                    previous_day_profile,
+                                    previous_day_bounds,
+                                    slice_utc_window,
+                                    utc_date_key,
+                                    utc_day_bounds)
+
+# ── The strategy, from its single implementation ──────────────────────────────
+from modules.forex_signal_engine import (  # noqa: F401
+    CONFIDENCE_BASE,
+    ELITE_CONFIDENCE,
+    FVG_MAX_AGE,
+    MIN_CONFIDENCE,
+    MIN_SWEEP_BODY_PCT,
+    MSS_MAX_CANDLES,
+    NEWS_BLACKOUT_WINDOWS,
+    SESSIONS,
+    SL_ATR_BUFFER,
+    SL_MAX_ATR,
+    STATE_EXPIRED,
+    STATE_FVG_FOUND,
+    STATE_IN_TRADE,
+    STATE_INVALID,
+    STATE_MSS_CONFIRMED,
+    STATE_SWEEP_DETECTED,
+    STATE_WAITING,
+    STRONG_CONFIDENCE,
+    SWING_LOOKBACK,
+    TERMINAL_STATES,
+    advance_setup,
+    build_setup,
+    calculate_atr,
+    calculate_confidence,
+    check_entry_retest,
+    closed_candles_only,
+    current_session,
+    detect_liquidity_sweep,
+    detect_mss,
+    detect_msss,
+    expire_setup,
+    find_fvg_after_sweep,
+    in_news_blackout,
+    invalidate_setup,
+    is_executable,
+    new_setup,
+    session_bounds,
+    session_minutes_until_open,
+    session_schedule,
+    session_time_remaining,
+    sessions_opening_within,
+    setup_is_expired,
+    volume_profile_confluence,
+    volume_profile_gateable,
+)
 
 logger = logging.getLogger(__name__)
 
-# ── Session windows (UTC) ─────────────────────────────────────────────────────
-# name -> (start_hour, end_hour, confidence_bonus)
-SESSIONS = {
-    "LONDON":       (8,  9,  3),
-    "NY_MORNING":   (15, 16, 4),   # institutional prime time
-    "NY_AFTERNOON": (19, 20, 2),
-}
+# H4 structure window and the EMA the spec requires the close to clear.
+H4_STRUCTURE_BARS   = 50
+H4_EMA_PERIOD       = 50
 
-# ── Setup quality thresholds ──────────────────────────────────────────────────
-MIN_CONFIDENCE   = 88
-STRONG_CONFIDENCE = 93
-ELITE_CONFIDENCE  = 96
-
-# ── Detection constants ───────────────────────────────────────────────────────
-SWING_LOOKBACK      = 5     # candles before the window used to mark liquidity
-MIN_SWEEP_BODY_PCT  = 0.40  # sweep candle body must exceed this share of its range
-MSS_MAX_CANDLES     = 3     # MSS must occur within this many candles of the sweep
-FVG_MAX_AGE         = 10    # FVG must form within this many candles of the sweep
-
-# Stop buffer beyond the sweep wick
-SL_ATR_BUFFER       = 0.5
-
-# Sanity ceiling on stop width, NOT the risk control.
-#
-# The spec asked for a 2-ATR cap, but the strategy's own geometry makes that
-# self-defeating: entry sits at the FVG (above the swept swing) while the stop
-# sits at the sweep wick (below it), so the span is structurally 2-4 ATR and a
-# 2-ATR cap rejects every setup the strategy defines.
-#
-# Risk is instead controlled by position sizing — a wider stop simply buys a
-# smaller position, keeping the dollar risk at the configured 1-2%. This cap
-# only refuses genuinely absurd setups (e.g. a stale wick far from price).
-SL_MAX_ATR          = 6.0
+# How far before a window opens its liquidity levels are marked. Levels taken
+# from inside the window are not the pre-session pools the strategy sweeps.
+PRESESSION_LOOKBACK_MIN = 30
 
 # ── Caches ────────────────────────────────────────────────────────────────────
 _daily_bias: Dict[str, Dict] = {}
-_session_levels: Dict[str, Dict[str, Dict]] = {}
+_session_levels: Dict[str, Dict] = {}      # session -> {symbol: levels}
+_session_levels_date: Dict[str, str] = {}  # session -> UTC date key of the marks
 _active_setups: Dict[str, Dict] = {}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  LAYER 1 — SESSION TIMING
-# ══════════════════════════════════════════════════════════════════════════════
-
-def current_session(now: Optional[datetime] = None) -> Optional[str]:
-    """Name of the session window currently open, or None."""
-    hour = (now or datetime.utcnow()).hour
-    for name, (start, end, _) in SESSIONS.items():
-        if start <= hour < end:
-            return name
-    return None
-
-
-def session_bounds(session_name: str) -> Tuple[datetime, datetime]:
-    """Today's UTC (open, close) datetimes for a session."""
-    start_hour, end_hour, _ = SESSIONS[session_name]
-    today = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    return (today.replace(hour=start_hour),
-            today.replace(hour=end_hour))
-
-
-def session_time_remaining(session_name: Optional[str]) -> int:
-    """Seconds until the named session closes (0 when not open)."""
-    if not session_name:
-        return 0
-    _, close = session_bounds(session_name)
-    return max(0, int((close - datetime.utcnow()).total_seconds()))
-
-
-def session_schedule() -> List[Dict]:
-    """Today's session windows with open/close times for the dashboard."""
-    out = []
-    now = datetime.utcnow()
-    for name, (start_hour, end_hour, _) in SESSIONS.items():
-        _, close = session_bounds(name)
-        open_dt = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        out.append({
-            "session": name,
-            "open_utc": open_dt.strftime("%H:%M"),
-            "close_utc": close.strftime("%H:%M"),
-            "active": current_session(now) == name,
-        })
-    return out
+# `check_entry_in_fvg` is the name the scheduler already calls; the engine calls
+# the same function `check_entry_retest`. `_closed_only` is the same look-ahead
+# guard the engine exports as `closed_candles_only`.
+check_entry_in_fvg = check_entry_retest
+_closed_only = closed_candles_only
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -128,7 +130,13 @@ def _ema(series: pd.Series, period: int = 50) -> float:
 
 
 def _swings(df: pd.DataFrame, lookback: int = 3):
-    """Positional indices of swing highs and lows."""
+    """
+    Positional indices of confirmed swing highs and lows.
+
+    A swing needs `lookback` bars on BOTH sides, so the newest `lookback` bars
+    can never be confirmed. The scan loop already stops short of the end for
+    exactly that reason and must keep doing so.
+    """
     highs, lows = [], []
     n = len(df)
     h = df["high"].astype(float).values
@@ -143,65 +151,79 @@ def _swings(df: pd.DataFrame, lookback: int = 3):
     return highs, lows
 
 
-def identify_h4_structure(h4_df: pd.DataFrame) -> Tuple[str, int]:
+def _consecutive_runs(df: pd.DataFrame, sh, sl) -> Tuple[int, int, int, int]:
     """
-    H4 market structure over the last 50 candles.
+    (hh, hl, ll, lh) run lengths, walking backwards from the newest swing.
 
-    Counts CONSECUTIVE higher highs and consecutive higher lows (or the
-    bearish equivalents), walking backwards from the most recent swing.
+    A run of 1 transition means two swings where the second is the higher (or
+    lower) one, i.e. the "at least 2 consecutive Higher Highs" the spec asks
+    for. Counting swings rather than transitions would require three swings and
+    would silently raise the bar the spec set.
+    """
+    hh = hl = ll = lh = 0
+    for i in range(len(sh) - 1, 0, -1):
+        if df["high"].iloc[sh[i]] > df["high"].iloc[sh[i - 1]]:
+            hh += 1
+        else:
+            break
+    for i in range(len(sl) - 1, 0, -1):
+        if df["low"].iloc[sl[i]] > df["low"].iloc[sl[i - 1]]:
+            hl += 1
+        else:
+            break
+    for i in range(len(sl) - 1, 0, -1):
+        if df["low"].iloc[sl[i]] < df["low"].iloc[sl[i - 1]]:
+            ll += 1
+        else:
+            break
+    for i in range(len(sh) - 1, 0, -1):
+        if df["high"].iloc[sh[i]] < df["high"].iloc[sh[i - 1]]:
+            lh += 1
+        else:
+            break
+    return hh, hl, ll, lh
 
-    Returns (bias, strength) where strength is the number of consecutive
-    HH/HL pairs (bullish) or LL/LH pairs (bearish) confirmed.
+
+def identify_h4_structure(h4_df: pd.DataFrame,
+                          structure_bars: int = H4_STRUCTURE_BARS,
+                          ema_period: int = H4_EMA_PERIOD
+                          ) -> Tuple[str, int]:
+    """
+    H4 market structure over the most recent `structure_bars` CLOSED candles.
+
+    Returns (bias, strength) where bias is BULLISH / BEARISH / NEUTRAL and
+    strength is the number of confirmed HH/HL (or LL/LH) transitions.
+
+    The spec's three conditions, all of which must hold:
+      1. at least 2 consecutive Higher Highs AND 2 consecutive Higher Lows
+         (the bearish mirror for a short bias), and
+      2. close above EMA50 for a long bias, below it for a short bias.
+
+    NEUTRAL is returned whenever any condition fails. That is a deliberate
+    outcome, not a failure: NEUTRAL means "no trade today" and is the single
+    most effective filter in the strategy, because it removes every symbol
+    whose higher timeframe does not agree with the intended direction.
     """
     try:
         if h4_df is None or len(h4_df) < 20:
             return "NEUTRAL", 0
 
-        df = h4_df.reset_index(drop=True).tail(50).reset_index(drop=True)
+        df = h4_df.reset_index(drop=True).tail(structure_bars).reset_index(drop=True)
         sh, sl = _swings(df)
 
         if len(sh) < 2 or len(sl) < 2:
             return "NEUTRAL", 0
 
         price = float(df["close"].iloc[-1])
-        ema50 = _ema(df["close"])
+        ema50 = _ema(df["close"], ema_period)
 
-        # Walk backwards from the latest swing counting consecutive runs
-        hh_run = 0
-        for i in range(len(sh) - 1, 0, -1):
-            if df["high"].iloc[sh[i]] > df["high"].iloc[sh[i - 1]]:
-                hh_run += 1
-            else:
-                break
+        hh, hl, ll, lh = _consecutive_runs(df, sh, sl)
 
-        hl_run = 0
-        for i in range(len(sl) - 1, 0, -1):
-            if df["low"].iloc[sl[i]] > df["low"].iloc[sl[i - 1]]:
-                hl_run += 1
-            else:
-                break
-
-        ll_run = 0
-        for i in range(len(sl) - 1, 0, -1):
-            if df["low"].iloc[sl[i]] < df["low"].iloc[sl[i - 1]]:
-                ll_run += 1
-            else:
-                break
-
-        lh_run = 0
-        for i in range(len(sh) - 1, 0, -1):
-            if df["high"].iloc[sh[i]] < df["high"].iloc[sh[i - 1]]:
-                lh_run += 1
-            else:
-                break
-
-        # Spec: "at least 2 consecutive Higher Highs + Higher Lows" means two
-        # highs where the second is higher — i.e. one upward transition. The
-        # count of highs in the run is transitions + 1.
-        hh_count = hh_run + 1 if hh_run else 0
-        hl_count = hl_run + 1 if hl_run else 0
-        ll_count = ll_run + 1 if ll_run else 0
-        lh_count = lh_run + 1 if lh_run else 0
+        # "2 consecutive Higher Highs" = 1 upward transition = 2 swings.
+        hh_count = hh + 1 if hh else 0
+        hl_count = hl + 1 if hl else 0
+        ll_count = ll + 1 if ll else 0
+        lh_count = lh + 1 if lh else 0
 
         if hh_count >= 2 and hl_count >= 2 and ema50 > 0 and price > ema50:
             return "BULLISH", min(hh_count, hl_count)
@@ -216,58 +238,81 @@ def identify_h4_structure(h4_df: pd.DataFrame) -> Tuple[str, int]:
 
 def calculate_daily_bias(symbol: str) -> Optional[Dict]:
     """
-    Build today's bias record for one symbol: H4 structure + volume profile
-    from the previous day's H1 candles, plus the resulting VP classification.
+    Build today's bias record for one symbol.
+
+    Three inputs, all from CLOSED candles only:
+      H4 structure  — bias + strength (see identify_h4_structure)
+      prior-day VP  — POC/VAH/VAL from the PREVIOUS UTC DAY's H1 candles
+      current price — the last closed H4 close
+
+    The bias record is keyed to the current UTC date so a record computed
+    yesterday can never be mistaken for today's.
     """
     try:
-        from modules.market_data_forex import get_candles
+        from modules.candle_provider import get_candles
 
-        h4 = get_candles(symbol, timeframe="4h", limit=60)
+        date_key = utc_date_key()
+
+        h4 = _closed_only(get_candles(symbol, timeframe="4h", limit=60), "4h")
         h4_bias, strength = identify_h4_structure(h4)
-        if h4_bias == "NEUTRAL":
-            logger.info(f"[bias] {symbol} H4: NEUTRAL — no trade today")
-            _daily_bias[symbol] = {
-                "h4_bias": "NEUTRAL", "strength": 0,
-                "vp_levels": None, "vp_bias": "UNKNOWN",
-                "session_date": datetime.utcnow().date().isoformat(),
-            }
-            return _daily_bias[symbol]
 
-        # Volume profile from the previous day's H1 candles
-        h1 = get_candles(symbol, timeframe="1h", limit=48)
-        vp = calculate_session_volume_profile(h1, num_bins=50) if h1 is not None else None
+        if h4_bias == "NEUTRAL":
+            record = {
+                "symbol": symbol,
+                "h4_bias": "NEUTRAL",
+                "strength": 0,
+                "vp_levels": None,
+                "vp_levels_valid": False,
+                "vp_levels_trusted": False,
+                "vp_bias": "UNKNOWN",
+                "price_position": "UNKNOWN",
+                "h4_close": None,
+                "ema50": None,
+                "session_date": date_key,
+                "computed_at": datetime.utcnow().isoformat(),
+                "volume_source": None,
+            }
+            _daily_bias[symbol] = record
+            logger.info(f"[bias] {symbol} H4: NEUTRAL — no trade today")
+            return record
+
+        # Previous UTC day's profile, bounded explicitly on the UTC boundary.
+        h1 = get_candles(symbol, timeframe="1h", limit=72)
+        vp = previous_day_profile(h1, num_bins=50) if h1 is not None else None
 
         price = float(h4["close"].iloc[-1]) if h4 is not None and len(h4) else 0.0
         position = classify_price_position(price, vp) if vp else "UNKNOWN"
 
-        # Volume profile bias — value area location relative to price
-        if vp and position == "ABOVE_VALUE" and h4_bias == "BULLISH":
-            vp_bias = "STRONG_BUY"
-        elif vp and position == "BELOW_VALUE" and h4_bias == "BEARISH":
-            vp_bias = "STRONG_SELL"
-        elif vp and position == "INSIDE_VALUE":
-            vp_bias = "REDUCED"
-        elif vp and position == "AT_POC":
-            vp_bias = "WAIT_REJECTION"
-        else:
-            vp_bias = "ALIGNED"
+        vp_bias = _vp_bias(vp, position, h4_bias)
+        gate_ok, gate_reason = gateable(vp)
 
         record = {
             "symbol": symbol,
             "h4_bias": h4_bias,
             "strength": strength,
             "vp_levels": vp,
+            "vp_levels_valid": bool(vp and vp.get("valid")),
+            "vp_levels_trusted": bool(vp and vp.get("source_trusted")),
             "vp_bias": vp_bias,
             "price_position": position,
-            "session_date": datetime.utcnow().date().isoformat(),
+            "h4_close": round(price, 5),
+            "ema50": round(_ema(h4["close"], H4_EMA_PERIOD), 5) if h4 is not None else None,
+            "session_date": date_key,
+            "computed_at": datetime.utcnow().isoformat(),
+            "volume_source": vp.get("volume_source") if vp else None,
+            "vp_gateable": gate_ok,
+            "vp_gate_reason": gate_reason,
         }
         _daily_bias[symbol] = record
 
         if vp:
-            logger.info(f"[vp] {symbol} POC={vp['poc']} VAH={vp['vah']} VAL={vp['val']}")
-        logger.info(f"[bias] {symbol} H4: {h4_bias} — {strength} HH/HL or LL/LH confirmed"
-                    + (", above EMA50" if h4_bias == "BULLISH" else
-                       ", below EMA50" if h4_bias == "BEARISH" else ""))
+            logger.info(f"[vp] {symbol} ({vp['volume_source']}) POC={vp['poc']} "
+                        f"VAH={vp['vah']} VAL={vp['val']}")
+        else:
+            logger.info(f"[bias] {symbol} no previous-day profile — "
+                        f"VP confluence unavailable")
+        logger.info(f"[bias] {symbol} H4: {h4_bias} — {strength} HH/HL or LL/LH "
+                    f"confirmed, EMA50={record['ema50']}")
         return record
 
     except Exception as e:
@@ -275,17 +320,49 @@ def calculate_daily_bias(symbol: str) -> Optional[Dict]:
         return None
 
 
-def calculate_daily_bias_all_pairs() -> int:
-    """Compute the daily bias for every configured forex pair."""
-    from config import FOREX_PAIRS
+def _vp_bias(vp: Optional[Dict], position: str, h4_bias: str) -> str:
+    """Grade the value-area location against the H4 bias."""
+    if not vp:
+        return "NO_PROFILE"
+    if position == "ABOVE_VALUE" and h4_bias == "BULLISH":
+        return "STRONG_BUY"
+    if position == "BELOW_VALUE" and h4_bias == "BEARISH":
+        return "STRONG_SELL"
+    if position == "INSIDE_VALUE":
+        return "REDUCED"
+    if position == "AT_POC":
+        return "WAIT_REJECTION"
+    return "ALIGNED"
 
-    logger.info(f"[bias] calculating daily bias for {len(FOREX_PAIRS)} pairs")
+
+def calculate_daily_bias_all_pairs(force: bool = False) -> int:
+    """
+    Compute the daily bias for every configured instrument.
+
+    Skips symbols that already have a bias for the current UTC day unless
+    `force` is set, so a restart mid-session does not re-poll every symbol and
+    burn the venue's rate limit for data that cannot have changed.
+    """
+    from config import SILVER_BULLET_INSTRUMENTS
+
+    todo = [s for s in SILVER_BULLET_INSTRUMENTS
+            if force or get_daily_bias(s) is None]
+
+    if not todo:
+        tradeable = len([b for b in _daily_bias.values()
+                         if b.get("h4_bias") != "NEUTRAL"])
+        logger.info(f"[bias] all {len(SILVER_BULLET_INSTRUMENTS)} symbols already "
+                    f"computed for {utc_date_key()} — {tradeable} tradeable")
+        return 0
+
+    logger.info(f"[bias] calculating daily bias for {len(todo)} symbols")
     count = 0
-    for symbol in FOREX_PAIRS:
+    for symbol in todo:
         try:
             if calculate_daily_bias(symbol):
                 count += 1
         except Exception as e:
+            # One bad symbol must not abort the sweep for the rest.
             logger.error(f"[bias] {symbol} error: {e}")
 
     tradeable = len([b for b in _daily_bias.values() if b.get("h4_bias") != "NEUTRAL"])
@@ -293,52 +370,140 @@ def calculate_daily_bias_all_pairs() -> int:
     return count
 
 
-def get_daily_bias(symbol: str) -> Optional[Dict]:
-    """Today's stored bias for a symbol (None when not computed)."""
+def get_daily_bias(symbol: str, now: Optional[datetime] = None) -> Optional[Dict]:
+    """
+    Today's stored bias for a symbol, or None when there is no bias for the
+    current UTC day.
+
+    The UTC date key is the entire staleness check. Anything computed on a
+    previous day — or before a redeploy, which loses this in-memory dict — is
+    reported as absent rather than as a valid bias, so a stale NEUTRAL cannot
+    block trading and a stale BULLISH cannot authorise it.
+    """
     rec = _daily_bias.get(symbol)
     if not rec:
         return None
-    if rec.get("session_date") != datetime.utcnow().date().isoformat():
+    if rec.get("session_date") != utc_date_key(now):
         return None
     return rec
 
 
-def get_all_daily_bias() -> Dict[str, Dict]:
-    return _daily_bias.copy()
+def get_all_daily_bias(now: Optional[datetime] = None) -> Dict[str, Dict]:
+    """Only today's records, keyed by symbol."""
+    key = utc_date_key(now)
+    return {s: b for s, b in _daily_bias.items() if b.get("session_date") == key}
 
 
-def reset_daily_cache() -> None:
-    """Clear daily state at 00:01 UTC."""
+def reset_daily_cache(reason: str = "scheduled") -> None:
+    """
+    Clear all day-scoped in-memory state.
+
+    Called at the UTC day boundary, and by the cycle whenever it notices the
+    stored date has rolled over. Both routes exist because the boundary job can
+    be missed: APScheduler with `coalesce` will skip a 00:01 cron entirely if
+    the process was down, and the container may simply be asleep.
+    """
     _daily_bias.clear()
     _session_levels.clear()
+    _session_levels_date.clear()
     _active_setups.clear()
-    logger.info("[silver] daily cache reset")
+    logger.info(f"[silver] daily cache reset ({reason}) for {utc_date_key()}")
+
+
+def ensure_current_day(now: Optional[datetime] = None) -> bool:
+    """
+    Reset if the day has rolled since the last reset.
+
+    Returns True when a reset happened. Guarded on a stored key rather than on
+    the contents of the dicts, so an all-NEUTRAL day (where the dict is
+    populated but nothing is tradeable) is not mistaken for "never computed".
+
+    In-memory only: after a redeploy the key is absent, the caches are already
+    empty, and this correctly reports no reset was needed.
+    """
+    key = utc_date_key(now)
+    last = _session_levels_date.get("__day__")
+    if last == key:
+        return False
+    if last is not None:
+        reset_daily_cache(f"UTC day rolled {last} -> {key}")
+    _session_levels_date["__day__"] = key
+    return last is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LAYER 3 — SESSION LIQUIDITY MARKS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def mark_session_liquidity(symbol: str, session_name: str) -> Optional[Dict]:
+def mark_session_liquidity(symbol: str, session_name: str,
+                           now: Optional[datetime] = None) -> Optional[Dict]:
     """
-    Record the swing high/low from the candles immediately before a session
-    opens. These are the liquidity pools the session is expected to sweep.
+    Record the swing high/low from the candles strictly BEFORE a session opens.
+
+    These are the liquidity pools the session is expected to sweep. The window
+    matters: taking the newest `SWING_LOOKBACK` candles instead — which is what
+    this used to do — samples the first minutes of the session it is supposed to
+    precede, so the "pool" was partly the move already in progress and the sweep
+    test became partly circular.
+
+    Every level is stamped with the UTC day it belongs to, so levels marked for
+    yesterday cannot be swept against today.
+
+    Returns the level record, or None when the window holds too few candles.
     """
     try:
-        from modules.market_data_forex import get_candles
+        from modules.candle_provider import get_candles
+        from config import SILVER_BULLET_INSTRUMENTS
 
-        df = get_candles(symbol, timeframe="5m", limit=30)
+        if symbol not in SILVER_BULLET_INSTRUMENTS:
+            logger.debug(f"[silver] {symbol} not an instrument of this strategy")
+
+        df = get_candles(symbol, timeframe="5m", limit=100)
         if df is None or len(df) < SWING_LOOKBACK + 1:
             return None
 
-        recent = df.tail(SWING_LOOKBACK)
+        open_dt, _close_dt = session_bounds(session_name, now)
+        ref = now or datetime.utcnow()
+        day_key = utc_date_key(ref)
+
+        # Candles in [open - PRESESSION_LOOKBACK_MIN, open).
+        if "timestamp" in df.columns:
+            window_start = pd.Timestamp(open_dt, tz="UTC") - \
+                pd.Timedelta(minutes=PRESESSION_LOOKBACK_MIN)
+            window_end = pd.Timestamp(open_dt, tz="UTC")
+            pre = slice_utc_window(df, window_start, window_end)
+            if pre is None or len(pre) < SWING_LOOKBACK:
+                # Before the window opens the 30-minute lookback is entirely in
+                # the past; if it is empty the feed is short, so fall back to
+                # the newest closed candles rather than marking nothing.
+                logger.debug(f"[silver] {symbol} pre-session window empty — "
+                             f"falling back to newest {SWING_LOOKBACK} candles")
+                pre = df
+        else:
+            pre = df
+
+        recent = pre.tail(SWING_LOOKBACK)
+        if len(recent) < SWING_LOOKBACK:
+            return None
+
+        swing_high = float(recent["high"].max())
+        swing_low = float(recent["low"].min())
+        if not (swing_high > 0) or not (swing_low > 0) or swing_high <= swing_low:
+            logger.debug(f"[silver] {symbol} degenerate liquidity range — skipping")
+            return None
+
         levels = {
+            "symbol": symbol,
             "session": session_name,
-            "swing_high": float(recent["high"].max()),
-            "swing_low": float(recent["low"].min()),
-            "marked_at": datetime.utcnow().isoformat(),
+            "swing_high": swing_high,
+            "swing_low": swing_low,
+            "range": round(swing_high - swing_low, 5),
+            "date": day_key,
+            "marked_at": ref.isoformat(),
+            "source_candles": len(recent),
         }
         _session_levels.setdefault(session_name, {})[symbol] = levels
+        _session_levels_date[session_name] = day_key
         return levels
 
     except Exception as e:
@@ -346,264 +511,75 @@ def mark_session_liquidity(symbol: str, session_name: str) -> Optional[Dict]:
         return None
 
 
-def pre_session_mark_liquidity(session_name: str) -> int:
-    """Mark session liquidity for every pair ahead of a window opening."""
-    from config import FOREX_PAIRS
+def pre_session_mark_liquidity(session_name: str,
+                               now: Optional[datetime] = None) -> int:
+    """
+    Mark session liquidity for every instrument ahead of a window opening.
+
+    Intended to run a few minutes before the window opens, so the levels are
+    the pre-session pools rather than candles from inside the window. Safe to
+    call repeatedly — each call rewrites the levels for that session and day.
+    """
+    from config import SILVER_BULLET_INSTRUMENTS
 
     logger.info(f"[silver] {session_name} pre-session liquidity marking")
     count = 0
-    for symbol in FOREX_PAIRS:
+    for symbol in SILVER_BULLET_INSTRUMENTS:
         try:
-            if mark_session_liquidity(symbol, session_name):
+            if mark_session_liquidity(symbol, session_name, now):
                 count += 1
         except Exception as e:
             logger.error(f"[silver] {symbol} mark error: {e}")
-    logger.info(f"[silver] {session_name} marked {count} pairs")
+    logger.info(f"[silver] {session_name} marked {count} symbols")
     return count
 
 
-def get_session_levels(symbol: str, session_name: str) -> Optional[Dict]:
-    return _session_levels.get(session_name, {}).get(symbol)
+def get_session_levels(symbol: str, session_name: str,
+                       now: Optional[datetime] = None) -> Optional[Dict]:
+    """
+    Today's marked liquidity for a symbol and session, or None.
+
+    A level marked on a previous UTC day is treated as absent, so a stale pool
+    cannot be swept against today's candles.
+    """
+    levels = _session_levels.get(session_name, {}).get(symbol)
+    if not levels:
+        return None
+    if levels.get("date") != utc_date_key(now):
+        return None
+    return levels
+
+
+def clear_session_levels(session_name: Optional[str] = None) -> int:
+    """Drop marked levels for one session, or all of them."""
+    if session_name:
+        removed = len(_session_levels.pop(session_name, {}))
+        _session_levels_date.pop(session_name, None)
+        return removed
+    removed = sum(len(v) for v in _session_levels.values())
+    _session_levels.clear()
+    _session_levels_date.clear()
+    return removed
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  LAYER 4 — SETUP DETECTION
+#  LAYERS 4 & 5 — SETUP DETECTION AND SCORING
+#
+#  These live in `modules.forex_signal_engine` and are imported at the top of
+#  this module:
+#
+#      detect_liquidity_sweep   sweep of the pre-session swing, body-filtered
+#      detect_mss / detect_msss market structure shift within 3 candles
+#      find_fvg_after_sweep     the imbalance left behind, within 10 candles
+#      calculate_confidence     the heuristic score (a RANKING, not a probability)
+#      is_executable            the hard 88 floor
+#      build_setup              the pipeline, returning a stateful setup record
+#      check_entry_retest       the FVG-retest entry, idempotent per setup
+#
+#  They were previously duplicated here. Keeping one copy is the point: two
+#  implementations of the same rule drift, and the drift is invisible because
+#  both look correct in isolation.
 # ══════════════════════════════════════════════════════════════════════════════
-
-def detect_liquidity_sweep(df_5m: pd.DataFrame, session_levels: Dict,
-                           h4_bias: str) -> Optional[Dict]:
-    """
-    A sweep is a candle that wicks beyond the session swing and closes back
-    inside, with a body strong enough to be a rejection rather than a doji.
-
-    BUY  setup: low < swing_low  AND close > swing_low
-    SELL setup: high > swing_high AND close < swing_high
-    """
-    try:
-        if df_5m is None or len(df_5m) < 5 or not session_levels:
-            return None
-
-        swing_high = session_levels.get("swing_high")
-        swing_low = session_levels.get("swing_low")
-        if swing_high is None or swing_low is None:
-            return None
-
-        # Scan the most recent candles, newest first
-        recent = df_5m.tail(10)
-        offset = len(df_5m) - len(recent)      # convert to an absolute index
-        for i in range(len(recent) - 1, -1, -1):
-            c = recent.iloc[i]
-            o, h, l, cl = (float(c["open"]), float(c["high"]),
-                           float(c["low"]), float(c["close"]))
-            rng = h - l
-            if rng <= 0:
-                continue
-            body_pct = abs(cl - o) / rng
-
-            swept_low = l < swing_low and cl > swing_low
-            swept_high = h > swing_high and cl < swing_high
-
-            if swept_low and h4_bias == "BULLISH":
-                if body_pct < MIN_SWEEP_BODY_PCT:
-                    continue
-                return {
-                    "direction": "BUY",
-                    "sweep_level": swing_low,
-                    "sweep_wick": l,
-                    "sweep_close": cl,
-                    # Absolute position in df_5m, so downstream detectors
-                    # (MSS, FVG) can index the same frame directly.
-                    "sweep_index": offset + i,
-                    "body_pct": round(body_pct, 3),
-                }
-
-            if swept_high and h4_bias == "BEARISH":
-                if body_pct < MIN_SWEEP_BODY_PCT:
-                    continue
-                return {
-                    "direction": "SELL",
-                    "sweep_level": swing_high,
-                    "sweep_wick": h,
-                    "sweep_close": cl,
-                    "sweep_index": offset + i,
-                    "body_pct": round(body_pct, 3),
-                }
-
-        return None
-
-    except Exception as e:
-        logger.error(f"[silver] sweep detection error: {e}")
-        return None
-
-
-def detect_mss(df_5m: pd.DataFrame, sweep: Dict,
-               max_candles: int = MSS_MAX_CANDLES) -> Optional[Dict]:
-    """
-    Market Structure Shift — after the sweep, price must close beyond the
-    opposing swing within `max_candles`.
-
-    BUY:  close above the most recent 5m swing high before the sweep
-    SELL: close below the most recent 5m swing low before the sweep
-    """
-    try:
-        if df_5m is None or not sweep:
-            return None
-
-        df = df_5m.reset_index(drop=True)
-        sweep_idx = sweep.get("sweep_index")
-        if sweep_idx is None or sweep_idx < 3:
-            return None
-
-        before = df.iloc[:sweep_idx]
-        if len(before) < 3:
-            return None
-
-        direction = sweep["direction"]
-
-        if direction == "BUY":
-            level = float(before["high"].tail(5).max())
-            after = df.iloc[sweep_idx + 1: sweep_idx + 1 + max_candles]
-            for offset, (_, c) in enumerate(after.iterrows(), start=1):
-                if float(c["close"]) > level:
-                    return {
-                        "direction": "BUY",
-                        "mss_level": level,
-                        "mss_index": sweep_idx + offset,
-                        "candles_to_mss": offset,
-                    }
-        else:
-            level = float(before["low"].tail(5).min())
-            after = df.iloc[sweep_idx + 1: sweep_idx + 1 + max_candles]
-            for offset, (_, c) in enumerate(after.iterrows(), start=1):
-                if float(c["close"]) < level:
-                    return {
-                        "direction": "SELL",
-                        "mss_level": level,
-                        "mss_index": sweep_idx + offset,
-                        "candles_to_mss": offset,
-                    }
-
-        return None
-
-    except Exception as e:
-        logger.error(f"[silver] MSS detection error: {e}")
-        return None
-
-
-def find_fvg_after_sweep(df_5m: pd.DataFrame, sweep: Dict,
-                         max_age: int = FVG_MAX_AGE) -> Optional[Dict]:
-    """
-    Fair value gap formed AFTER the sweep, within `max_age` candles.
-
-    Bullish FVG: candles[i+2].low  > candles[i].high
-    Bearish FVG: candles[i+2].high < candles[i].low
-    """
-    try:
-        if df_5m is None or len(df_5m) < 5 or not sweep:
-            return None
-
-        df = df_5m.reset_index(drop=True)
-        sweep_idx = sweep.get("sweep_index")
-        if sweep_idx is None:
-            return None
-
-        start = sweep_idx + 1
-        end = min(len(df) - 2, start + max_age)
-
-        for i in range(start, end):
-            c1 = df.iloc[i]
-            c3 = df.iloc[i + 2]
-
-            if sweep["direction"] == "BUY":
-                if float(c3["low"]) > float(c1["high"]):
-                    high = float(c3["low"])
-                    low = float(c1["high"])
-                    return {
-                        "fvg_high": round(high, 5),
-                        "fvg_low": round(low, 5),
-                        "fvg_midpoint": round((high + low) / 2, 5),
-                        "fvg_index": i,
-                        "type": "bullish_fvg",
-                        "single_candle": (i + 2) - i == 2,
-                    }
-            else:
-                if float(c3["high"]) < float(c1["low"]):
-                    high = float(c1["low"])
-                    low = float(c3["high"])
-                    return {
-                        "fvg_high": round(high, 5),
-                        "fvg_low": round(low, 5),
-                        "fvg_midpoint": round((high + low) / 2, 5),
-                        "fvg_index": i,
-                        "type": "bearish_fvg",
-                        "single_candle": True,
-                    }
-
-        return None
-
-    except Exception as e:
-        logger.error(f"[silver] FVG detection error: {e}")
-        return None
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  LAYER 5 — CONFIDENCE SCORING
-# ══════════════════════════════════════════════════════════════════════════════
-
-def calculate_confidence(bias_data: Dict, sweep: Dict, mss: Dict,
-                         fvg: Dict, vp_confluence: Dict,
-                         session_name: str) -> int:
-    """
-    Score a setup from 85 upwards.
-
-    The trend bonus is applied only when structure is genuinely confirmed,
-    so the score can legitimately fall below the 88 floor and be rejected.
-    """
-    try:
-        confidence = 85
-
-        # ── Volume profile ───────────────────────────────────────────────────
-        grade = (vp_confluence or {}).get("grade", "NO_CONFLUENCE")
-        if grade == "POC_OVERLAP":
-            confidence += 8
-        elif grade in ("VAH_CONFLUENCE", "VAL_CONFLUENCE"):
-            confidence += 5
-        else:
-            confidence -= 3
-
-        if (bias_data or {}).get("price_position") in ("ABOVE_VALUE", "BELOW_VALUE"):
-            confidence += 3
-
-        # ── Market structure ─────────────────────────────────────────────────
-        strength = (bias_data or {}).get("strength", 0)
-        if strength >= 3:
-            confidence += 5
-        elif strength == 2:
-            confidence += 3
-        elif (bias_data or {}).get("h4_bias") == "NEUTRAL":
-            confidence -= 5
-
-        # ── Session ──────────────────────────────────────────────────────────
-        confidence += SESSIONS.get(session_name, (0, 0, 0))[2]
-
-        # ── Setup quality ────────────────────────────────────────────────────
-        body_pct = (sweep or {}).get("body_pct", 0.0)
-        if body_pct > 0.70:
-            confidence += 3
-        elif body_pct >= 0.50:
-            confidence += 2
-
-        if (mss or {}).get("candles_to_mss", 99) == 1:
-            confidence += 2
-
-        if (fvg or {}).get("single_candle"):
-            confidence += 2
-
-        return int(min(confidence, 99))
-
-    except Exception as e:
-        logger.error(f"[silver] confidence error: {e}")
-        return 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,115 +598,149 @@ def clear_active_setup(symbol: str) -> None:
     _active_setups.pop(symbol, None)
 
 
-def expire_setups(session_name: Optional[str] = None) -> int:
-    """Drop setups whose session window has closed."""
-    now = datetime.utcnow()
+def expire_setups(session_name: Optional[str] = None,
+                  now: Optional[datetime] = None) -> int:
+    """
+    Cancel setups that are past their expiry or have become invalid.
+
+    The expiry rule itself is `forex_signal_engine.setup_is_expired` — the
+    session CLOSE, or the UTC day roll. It is not re-derived here, so the store
+    and the engine can never disagree about whether a setup is still live.
+
+    A cancelled setup is marked EXPIRED rather than silently deleted, so the
+    reason it stopped being tradeable survives in the record.
+    """
+    ref = now or datetime.utcnow()
     expired = 0
     for symbol, setup in list(_active_setups.items()):
         if session_name and setup.get("session") != session_name:
             continue
-        sess = setup.get("session")
-        if not sess:
+        if setup.get("state") in TERMINAL_STATES:
+            # Already finished; drop it so the store does not grow all day.
+            _active_setups.pop(symbol, None)
             continue
-        _, close = session_bounds(sess)
-        if now >= close:
+        if setup_is_expired(setup, ref):
+            expire_setup(setup, ref)
             _active_setups.pop(symbol, None)
             expired += 1
     if expired:
-        logger.info(f"[silver] expired {expired} setups past window close")
+        logger.info(f"[silver] expired {expired} setups past window close or day roll")
     return expired
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LAYER 10 — MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_silver_bullet_scan(session_name: str) -> int:
+def run_silver_bullet_scan(session_name: str,
+                           now: Optional[datetime] = None) -> int:
     """
-    Scan every pair for a Silver Bullet setup during an open session window.
-    Returns the number of new setups stored.
-    """
-    from config import FOREX_PAIRS
-    from modules.market_data_forex import get_candles
-    from modules.forex_position_manager import can_open_forex_trade
+    Scan every instrument for a Silver Bullet setup during an open session.
 
-    if current_session() != session_name:
+    Returns the number of new setups stored. Candles come from the provider
+    seam so the same detector works on Capital.com FX/metals and on Binance
+    crypto.
+    """
+    from config import SILVER_BULLET_INSTRUMENTS
+    from modules.candle_provider import get_candles
+
+    if current_session(now) != session_name:
         return 0
 
-    logger.info(f"[silver] {session_name} window OPEN — scanning {len(FOREX_PAIRS)} pairs")
+    blocked, label = in_news_blackout(now)
+    if blocked:
+        logger.info(f"[silver] {session_name} inside news blackout {label} — "
+                    f"no new setups")
+        return 0
+
+    logger.info(f"[silver] {session_name} window OPEN — scanning "
+                f"{len(SILVER_BULLET_INSTRUMENTS)} symbols")
     stored = 0
 
-    for symbol in FOREX_PAIRS:
+    for symbol in SILVER_BULLET_INSTRUMENTS:
         try:
             if symbol in _active_setups:
                 continue
 
-            bias_data = get_daily_bias(symbol)
+            # An instrument the venue cannot actually trade is skipped rather
+            # than scanned: a setup on it could never be filled, and putting one
+            # on the dashboard would advertise a trade that cannot happen.
+            from modules.forex_executor import execution_adapter_for
+            adapter = execution_adapter_for(symbol)
+            if adapter is None:
+                logger.warning(f"[silver] {symbol} has no execution adapter — "
+                               f"skipping (unsupported instrument)")
+                continue
+
+            bias_data = get_daily_bias(symbol, now)
             if not bias_data or bias_data.get("h4_bias") == "NEUTRAL":
                 continue
 
-            session_levels = get_session_levels(symbol, session_name)
-            if not session_levels:
-                mark_session_liquidity(symbol, session_name)
-                session_levels = get_session_levels(symbol, session_name)
-                if not session_levels:
+            # Duplicate/limit guards are per venue. Capital.com positions go
+            # through the broker-side check; crypto uses its own open-trade and
+            # daily-drawdown limits, which are the same controls the crypto
+            # strategy already enforced.
+            if adapter == "capital":
+                from modules.forex_position_manager import can_open_forex_trade
+                allowed, _reason = can_open_forex_trade(symbol)
+                if not allowed:
+                    continue
+            else:
+                from modules.position_manager import (can_reenter,
+                                                      daily_drawdown_check)
+                if not daily_drawdown_check():
+                    logger.info(f"[silver] {symbol} crypto daily drawdown limit "
+                                f"reached — skipping")
+                    continue
+                # `can_reenter` reads the cooldown table, so it needs a session.
+                # A failure to open one must skip the symbol rather than trade
+                # without the cooldown check.
+                from database import SessionLocal
+                db = SessionLocal()
+                try:
+                    allowed, _reason = can_reenter(symbol, db)
+                finally:
+                    db.close()
+                if not allowed:
                     continue
 
-            allowed, _reason = can_open_forex_trade(symbol)
-            if not allowed:
-                continue
+            session_levels = get_session_levels(symbol, session_name, now)
+            if not session_levels:
+                mark_session_liquidity(symbol, session_name, now)
+                session_levels = get_session_levels(symbol, session_name, now)
+                if not session_levels:
+                    continue
 
             df_5m = get_candles(symbol, timeframe="5m", limit=50)
             if df_5m is None or len(df_5m) < 20:
                 continue
 
-            sweep = detect_liquidity_sweep(df_5m, session_levels, bias_data["h4_bias"])
-            if not sweep:
+            # The engine runs the whole pipeline and always returns a record,
+            # so a rejection comes back naming the stage that refused it rather
+            # than as an unexplained None.
+            setup = build_setup(symbol, df_5m, session_levels, bias_data,
+                                session_name, now)
+
+            if not setup.get("executable"):
+                logger.debug(f"[silver] {symbol} {session_name} rejected at "
+                             f"{setup.get('state')}: {setup.get('reject_reason')}")
                 continue
 
-            logger.info(f"[silver] {symbol} sweep detected — "
-                        f"{'low' if sweep['direction'] == 'BUY' else 'high'}="
-                        f"{sweep['sweep_wick']} swept, closed @ {sweep['sweep_close']}")
+            # Carry the bias context the entry path and the dashboard read.
+            setup["bias"] = bias_data["h4_bias"]
+            setup["bias_strength"] = bias_data.get("strength", 0)
+            setup["vp_gateable"] = bool(bias_data.get("vp_gateable"))
+            setup["vp_gate_reason"] = bias_data.get("vp_gate_reason")
 
-            mss = detect_mss(df_5m, sweep)
-            if not mss:
-                continue
-            logger.info(f"[silver] {symbol} MSS confirmed — broke {mss['mss_level']}")
-
-            fvg = find_fvg_after_sweep(df_5m, sweep)
-            if not fvg:
-                continue
-
-            vp_confluence = check_fvg_confluence(fvg, bias_data.get("vp_levels"))
-            logger.info(f"[silver] {symbol} FVG found — {fvg['fvg_low']} to "
-                        f"{fvg['fvg_high']} | {vp_confluence['grade']} confluence")
-
-            confidence = calculate_confidence(
-                bias_data, sweep, mss, fvg, vp_confluence, session_name
-            )
-            if confidence < MIN_CONFIDENCE:
-                logger.info(f"[silver] {symbol} {session_name} conf={confidence}% "
-                            f"below min — skip")
-                continue
-
-            _, session_close = session_bounds(session_name)
-            store_active_setup(symbol, {
-                "symbol": symbol,
-                "direction": sweep["direction"],
-                "fvg": fvg,
-                "sweep": sweep,
-                "mss": mss,
-                "confidence": confidence,
-                "vp_levels": bias_data.get("vp_levels"),
-                "vp_confluence": vp_confluence["grade"],
-                "session": session_name,
-                "bias": bias_data["h4_bias"],
-                "expires_at": session_close.isoformat(),
-                "created_at": datetime.utcnow().isoformat(),
-            })
+            store_active_setup(symbol, setup)
             stored += 1
-            logger.info(f"[silver] {symbol} conf={confidence}% — SETUP STORED "
-                        f"waiting for FVG entry")
+
+            vp = bias_data.get("vp_levels") or {}
+            logger.info(f"[silver] {symbol} {session_name} "
+                        f"conf={setup['confidence']}% — SETUP STORED "
+                        f"(state={setup['state']}, vp={setup['vp_confluence']}, "
+                        f"source={vp.get('volume_source')}) waiting for FVG entry")
 
         except Exception as e:
             logger.error(f"[silver] {symbol} error: {e}")
@@ -739,117 +749,9 @@ def run_silver_bullet_scan(session_name: str) -> int:
     return stored
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  LAYER 6/7 — ENTRY, STOPS AND TARGETS
-# ══════════════════════════════════════════════════════════════════════════════
 
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """Average true range of the entry timeframe."""
-    try:
-        if df is None or len(df) < period + 1:
-            return 0.0
-        high, low, close = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(period).mean().iloc[-1]
-        return float(atr) if pd.notna(atr) else 0.0
-    except Exception as e:
-        logger.error(f"[silver] ATR error: {e}")
-        return 0.0
-
-
-def check_entry_in_fvg(setup: Dict, current_price: float,
-                       df_5m: pd.DataFrame) -> Optional[Dict]:
-    """
-    Fire when price returns into the stored FVG.
-
-    Returns a signal dict with entry, SL and the three targets, or None.
-    """
-    try:
-        if not setup or current_price is None:
-            return None
-
-        fvg = setup.get("fvg") or {}
-        direction = setup.get("direction")
-        fvg_low = float(fvg.get("fvg_low") or 0.0)
-        fvg_high = float(fvg.get("fvg_high") or 0.0)
-        if fvg_low <= 0 or fvg_high <= 0:
-            return None
-
-        if not (fvg_low <= current_price <= fvg_high):
-            return None
-
-        atr = calculate_atr(df_5m)
-        if atr <= 0:
-            return None
-
-        sweep = setup.get("sweep") or {}
-        symbol = setup.get("symbol", "?")
-        sweep_wick = float(sweep.get("sweep_wick", 0.0))
-        if sweep_wick <= 0:
-            return None
-
-        entry = current_price
-
-        # The spec caps the stop at 2 ATR, but also places entry at the FVG
-        # (above the swept swing) and the stop at the sweep wick (below it).
-        # That structural span alone is routinely 2-4 ATR, so a 2-ATR cap
-        # rejects every setup the strategy defines. Risk is controlled by
-        # position sizing instead — a wider stop buys a smaller position.
-        # SL_MAX_ATR here only refuses genuinely absurd (stale-wick) setups.
-        structural_risk = abs(entry - sweep_wick)
-        if structural_risk > SL_MAX_ATR * atr:
-            logger.info(f"[silver] {symbol} structural stop {structural_risk/atr:.2f} ATR "
-                        f"> {SL_MAX_ATR} ATR — wick too far from price, skip")
-            return None
-
-        if direction == "BUY":
-            sl = sweep_wick - (SL_ATR_BUFFER * atr)
-        else:
-            sl = sweep_wick + (SL_ATR_BUFFER * atr)
-
-        risk = abs(entry - sl)
-        if risk <= 0:
-            return None
-
-        # Enforce the 0.5 ATR minimum by widening the stop, never by
-        # tightening it (a tighter stop would raise the chance of a wick-out).
-        if risk < 0.5 * atr:
-            sl = entry - (0.5 * atr) if direction == "BUY" else entry + (0.5 * atr)
-            risk = abs(entry - sl)
-
-        sign = 1 if direction == "BUY" else -1
-        tp1 = entry + sign * risk * 1.0
-        tp2 = entry + sign * risk * 2.0
-        tp3 = entry + sign * risk * 3.0
-
-        return {
-            "symbol": symbol,
-            "signal": direction,
-            "entry_price": round(entry, 5),
-            "stop_loss": round(sl, 5),
-            "take_profit": round(tp3, 5),      # broker-level TP = final target
-            "tp1": round(tp1, 5),
-            "tp2": round(tp2, 5),
-            "tp3": round(tp3, 5),
-            "risk_distance": round(risk, 5),
-            "atr": round(atr, 5),
-            "confidence": setup.get("confidence", 0),
-            "entry_type": "SILVER_BULLET_FVG",
-            "session": setup.get("session"),
-            "vp_confluence": setup.get("vp_confluence"),
-            "trend_direction": setup.get("bias"),
-            "crt_setup": "SILVER_BULLET",
-            "crt_timeframe": "5m",
-            "confirm_timeframe": "5m",
-            "entry_timeframe": "5m",
-            "poi": "fvg",
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    except Exception as e:
-        logger.error(f"[silver] entry check error: {e}")
-        return None
+# LAYER 6/7 — ENTRY, STOPS AND TARGETS
+#
+# The entry, its stop and its three targets live in `forex_signal_engine`
+# (`check_entry_retest`, exported here as `check_entry_in_fvg`) together with
+# the ATR it is sized from. There is no second copy here.

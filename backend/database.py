@@ -64,6 +64,25 @@ def run_light_migrations():
             ("tp2", "FLOAT"),
             ("entry_type", varchar),
             ("partial_tp_hit", f"BOOLEAN DEFAULT {bool_default}"),
+            # Silver Bullet trade management — a live position must survive a
+            # restart with its partial and stop state intact, or the next cycle
+            # repeats a partial close or reverts a trailed stop.
+            ("tp3", "FLOAT"),
+            ("original_lots", "FLOAT"),
+            ("initial_stop", "FLOAT"),
+            ("initial_risk", "FLOAT"),
+            ("tp1_done", f"BOOLEAN DEFAULT {bool_default}"),
+            ("tp2_done", f"BOOLEAN DEFAULT {bool_default}"),
+            ("tp3_done", f"BOOLEAN DEFAULT {bool_default}"),
+            ("breakeven_done", f"BOOLEAN DEFAULT {bool_default}"),
+            ("trailing_active", f"BOOLEAN DEFAULT {bool_default}"),
+            ("peak_price", "FLOAT"),
+            ("session_name", varchar),
+            ("session_expires_at", "TIMESTAMP"),
+            ("management_state", "TEXT"),
+            ("close_reason", varchar),
+            ("vp_confluence", varchar),
+            ("partial_close_pct", "FLOAT"),
         ],
     }
     try:

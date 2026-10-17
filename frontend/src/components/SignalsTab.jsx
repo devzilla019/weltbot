@@ -13,7 +13,7 @@ export default function SignalsTab({signals,botStatus,loading}){
     <div>
       <div className="hero">
         <div className="hero-title">Structure <span className="accent">Signals</span></div>
-        <div className="hero-sub">{signals.length} assets · SMC v5.2 with HTF bias filter</div>
+        <div className="hero-sub">{signals.length} assets · Silver Bullet v5.5</div>
         <div className="hero-chips">
           <span className="hero-chip">Active <b>{counts.active}</b></span>
           <span className="hero-chip">Buy <b>{counts.buy}</b></span>

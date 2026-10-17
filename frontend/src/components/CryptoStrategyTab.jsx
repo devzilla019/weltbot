@@ -40,9 +40,9 @@ export default function CryptoStrategyTab(){
     <div>
       <div className="hero">
         <div className="hero-title">Crypto <span className="accent">Strategy Engine</span></div>
-        <div className="hero-sub">Kronos AI bias → CRT sweep → SMC entry · Binance USDT futures</div>
+        <div className="hero-sub">Silver Bullet + Volume Profile · Binance</div>
         <div className="hero-chips">
-          <span className="hero-chip">Kronos <b>{data?.kronos_available?"ACTIVE":"OFFLINE"}</b></span>
+          <span className="hero-chip">Session <b>{data?.active_session||"—"}</b></span>
           <span className="hero-chip">Universe <b>{universe.length}</b></span>
           <span className="hero-chip">Biases <b>{biasCount}</b></span>
           <span className="hero-chip">Setups <b>{Object.keys(setups).length}</b></span>
@@ -55,30 +55,28 @@ export default function CryptoStrategyTab(){
           <div className="metric-value" style={{color:"var(--buy)"}}>
             ${(balance?.balance||0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}
           </div>
-          <div className="metric-sub">USDT futures · separate from forex</div>
+          <div className="metric-sub">USDT · separate from forex</div>
         </div>
         <div className="metric">
-          <div className="metric-label">Kronos Biases</div>
+          <div className="metric-label">Daily Biases</div>
           <div className="metric-value" style={{color:"var(--lav-2)"}}>{biasCount}</div>
-          <div className="metric-sub">updated every 15 min</div>
+          <div className="metric-sub">H4 structure + volume profile</div>
         </div>
         <div className="metric">
           <div className="metric-label">Active Setups</div>
           <div className="metric-value" style={{color:"var(--info)"}}>{Object.keys(setups).length}</div>
-          <div className="metric-sub">CRT confirmed + Kronos aligned</div>
+          <div className="metric-sub">sweep + MSS + FVG armed</div>
         </div>
         <div className="metric">
-          <div className="metric-label">Engine</div>
-          <div className="metric-value" style={{color:data?.kronos_enabled?"var(--buy)":"var(--text3)",fontSize:18}}>
-            {data?.kronos_enabled?"ONLINE":"DISABLED"}
-          </div>
-          <div className="metric-sub">set KRONOS_ENABLED=true</div>
+          <div className="metric-label">Strategy</div>
+          <div className="metric-value" style={{color:"var(--buy)",fontSize:18}}>SILVER BULLET</div>
+          <div className="metric-sub">minimum score {data?.min_confidence??88}</div>
         </div>
       </div>
 
       <div className="sec-head">
         <div className="sec-title">Market Signals</div>
-        <div className="sec-sub">{universe.length} symbols · Kronos + CRT</div>
+        <div className="sec-sub">{universe.length} symbols · Silver Bullet</div>
       </div>
 
       {err&&<div className="info-box info-box-red" style={{marginBottom:12}}>⚠ {err}</div>}
@@ -88,40 +86,54 @@ export default function CryptoStrategyTab(){
           const b=biases[sym];
           const lv=levels[sym];
           const st=setups[sym];
-          const bias=b?.bias||"NEUTRAL";
+          const bias=b?.h4_bias||"NEUTRAL";
           const cls=bias==="BULLISH"?"buy":bias==="BEARISH"?"sell":"";
           const chip=bias==="BULLISH"?"chip-bull":bias==="BEARISH"?"chip-bear":"chip-neutral";
-          const pos=(lv&&b?.current_close)?Math.max(0,Math.min(100,((b.current_close-lv.pdl)/(lv.pdh-lv.pdl))*100)):50;
+          const poc=lv?.poc, vah=lv?.vah, val=lv?.val;
+          const price=st?.fvg_low??null;
+          const pos=(price&&vah&&val)?Math.max(0,Math.min(100,((price-val)/(vah-val))*100)):50;
           return(
             <div key={sym} className={`pair-card ${cls}`}>
               <div className="pair-head">
                 <div className="pair-symbol">{sym.replace("/USDT","")}<span style={{fontSize:10,color:"var(--text3)"}}>/USDT</span></div>
                 <span className={`chip ${chip}`}><span className="chip-dot"/>{bias}</span>
               </div>
-              <div className="pair-price-label">Kronos Forecast Close</div>
-              <div className="pair-price">{b?.predicted_close_24h?b.predicted_close_24h.toLocaleString(undefined,{maximumFractionDigits:4}):"—"}</div>
-              {b?.predicted_change_pct!==undefined&&(
-                <div style={{fontFamily:"var(--font-mono)",fontSize:11,marginTop:2,color:b.predicted_change_pct>=0?"var(--buy)":"var(--sell)"}}>
-                  {b.predicted_change_pct>=0?"+":""}{b.predicted_change_pct}% · 24h
-                </div>
-              )}
-              {lv&&(
+              <div className="pair-price-label">Previous-Day Value Area</div>
+              {lv?(
                 <>
                   <div className="range-meter"><div className="range-marker" style={{left:`${pos}%`}}/></div>
                   <div className="range-labels">
-                    <span style={{color:"var(--sell)"}}>PDH {lv.pdh?.toLocaleString(undefined,{maximumFractionDigits:4})}</span>
-                    <span style={{color:"var(--buy)"}}>PDL {lv.pdl?.toLocaleString(undefined,{maximumFractionDigits:4})}</span>
+                    <span style={{color:"var(--sell)"}}>VAL {val?.toLocaleString(undefined,{maximumFractionDigits:6})}</span>
+                    <span style={{color:"var(--warn)"}}>POC {poc?.toLocaleString(undefined,{maximumFractionDigits:6})}</span>
+                    <span style={{color:"var(--buy)"}}>VAH {vah?.toLocaleString(undefined,{maximumFractionDigits:6})}</span>
+                  </div>
+                  <div style={{textAlign:"center",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",marginTop:6}}>
+                    {lv.source_trusted?`${lv.volume_source} volume`:`${lv.volume_source||"range"} proxy`}
                   </div>
                 </>
+              ):(
+                <div style={{fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",textAlign:"center",padding:"8px 0"}}>
+                  No previous-day profile
+                </div>
+              )}
+              {b?.price_position&&(
+                <div style={{textAlign:"center",fontFamily:"var(--font-mono)",fontSize:9,color:"var(--text3)",marginTop:4}}>
+                  price {String(b.price_position).replace(/_/g," ").toLowerCase()}
+                </div>
               )}
               <div className="pipeline">
-                <div className={`pipeline-step ${b?"on":""}`}>Kronos</div>
+                <div className={`pipeline-step ${b?"on":""}`}>H4</div>
                 <span className="pipeline-arrow">›</span>
-                <div className={`pipeline-step ${lv?"on":""}`}>CRT</div>
+                <div className={`pipeline-step ${lv?"on":""}`}>VP</div>
                 <span className="pipeline-arrow">›</span>
-                <div className={`pipeline-step ${st?"on":""}`}>SMC</div>
+                <div className={`pipeline-step ${st?"on":""}`}>FVG</div>
               </div>
-              {st&&<div className="chip chip-live" style={{marginTop:10}}><span className="chip-dot pulse"/>SETUP · {st.direction} → {st.target?.toLocaleString(undefined,{maximumFractionDigits:4})}</div>}
+              {st&&(
+                <div className="chip chip-live" style={{marginTop:10}}>
+                  <span className="chip-dot pulse"/>
+                  {st.state||"ARMED"} · {st.direction} · score {st.confidence??"—"}
+                </div>
+              )}
             </div>
           );
         })}
